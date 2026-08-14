@@ -3,9 +3,27 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+
+def replace_section(markdown: str, heading: str, body: str) -> str:
+    """Swap one ``## n. Title`` section's body, leaving the rest untouched.
+
+    The deep stage runs after the daily brief is already on disk, so it patches
+    section 5 in place rather than re-deriving the whole brief. Returns the
+    input unchanged when the heading is absent, so a schema change upstream
+    degrades to "the brief still says pending" instead of a crash.
+    """
+    pattern = re.compile(
+        rf"^{re.escape(heading)}\s*$.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL
+    )
+    if not pattern.search(markdown):
+        log.warning("Section %r not found; brief left unpatched.", heading)
+        return markdown
+    return pattern.sub(lambda _: f"{heading}\n\n{body.strip()}\n\n", markdown, count=1)
 
 
 def write_report(path: Path, content: str, bucket: str = "") -> Path:

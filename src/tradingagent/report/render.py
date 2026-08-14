@@ -48,6 +48,9 @@ class ReportContext:
     stage: str = "discovery"
     max_per_sector: int = 3
     deep_cap: int = 3
+    # Set once the deep stage has run in the same process (``--stage all``);
+    # a standalone ``--stage deep`` patches this section on disk instead.
+    deep_index: str | None = None
 
 
 def _pct(value: float | None, digits: int = 2) -> str:
@@ -218,8 +221,14 @@ def _section_shortlist(ctx: ReportContext) -> str:
     return "\n".join(lines)
 
 
+DEEP_HEADING = "## 5. Deep Analysis"
+
+
 def _section_deep(ctx: ReportContext) -> str:
     from ..discovery.shortlist import deep_dive_queue
+
+    if ctx.deep_index is not None:
+        return f"{DEEP_HEADING}\n\n{ctx.deep_index}\n"
 
     queued = deep_dive_queue(ctx.shortlist, ctx.sector_map, cap=ctx.deep_cap)
     queue = (
@@ -227,7 +236,7 @@ def _section_deep(ctx: ReportContext) -> str:
         or "none"
     )
     return (
-        "## 5. Deep Analysis\n\n"
+        f"{DEEP_HEADING}\n\n"
         "_Not run in this stage — `--stage deep` executes the ported TradingAgents pipeline and "
         "writes `deep/<ticker>.md` per ticker._\n\n"
         f"Deep-analysis queue (round-robin across leading sectors): {queue}\n"

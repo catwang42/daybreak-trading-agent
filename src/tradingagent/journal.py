@@ -99,6 +99,44 @@ def entries_from_shortlist(shortlist, run_date: date, report_path: str, stage: s
     return out
 
 
+DEEP_SIGNAL_SOURCES = [
+    "yfinance:ohlcv",
+    "yfinance:fundamentals",
+    "yfinance:positioning",
+    "finnhub:news",
+    "screener:momentum-burst",
+    "pipeline:analysts+debate+risk",
+]
+
+
+def entries_from_deep(results, run_date: date, report_dir: str = ""):
+    """One journal line per deep dive — the portfolio manager's verdict.
+
+    Written alongside the M1 discovery lines rather than replacing them, so the
+    journal records what was believed at each stage and a later review can ask
+    whether the deep dive improved on the quick take.
+    """
+    prefix = report_dir or f"reports/{run_date.isoformat()}/deep"
+    out: list[JournalEntry] = []
+    for result in results:
+        decision = result.decision
+        out.append(
+            JournalEntry(
+                date=run_date.isoformat(),
+                ticker=result.symbol,
+                verdict=decision.rating if decision else "DEGRADED",
+                confidence=decision.confidence if decision else "",
+                report=f"{prefix}/{result.symbol}.md",
+                target=decision.price_target if decision else None,
+                signal_sources=list(DEEP_SIGNAL_SOURCES),
+                stage="deep",
+                screener_score=result.queued.screener.get("score"),
+                deep_dive_priority=result.queued.priority or None,
+            )
+        )
+    return out
+
+
 def read_entries(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
