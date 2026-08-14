@@ -176,7 +176,12 @@ class LLMGateway:
         try:
             return _parse_schema(raw, schema)
         except (ValidationError, ValueError) as first_error:
-            log.warning("Schema violation on tier=%s (%s); re-prompting once.", tier, schema.__name__)
+            log.warning(
+                "Schema violation on tier=%s (%s): %s; re-prompting once.",
+                tier,
+                schema.__name__,
+                _violation_digest(first_error),
+            )
             repair = (
                 f"{json_prompt}\n\nYour previous reply was rejected:\n{first_error}\n"
                 "Reply again with ONLY the corrected JSON object."
@@ -287,6 +292,21 @@ def _schema_instruction(schema: type[BaseModel]) -> str:
 
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
+
+def _violation_digest(error: Exception) -> str:
+    """Which fields failed and why, in one line — the re-prompt costs a call each time.
+
+    Pydantic's own ``str()`` runs to several lines and quotes the whole rejected
+    value back, which would put model prose (and its length) into the logs.
+    """
+    if not isinstance(error, ValidationError):
+        return str(error).splitlines()[0][:160]
+    parts = []
+    for err in error.errors()[:4]:
+        field = ".".join(str(loc) for loc in err["loc"]) or "<root>"
+        parts.append(f"{field}: {err['type']}")
+    return ", ".join(parts)
 
 
 def _parse_schema(raw: str, schema: type[ModelT]) -> ModelT:

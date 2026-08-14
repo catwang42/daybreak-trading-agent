@@ -1,0 +1,279 @@
+"""Render ``reports/<date>/deep/<ticker>.md`` in the exact order of
+``config/report-schema.md``.
+
+Section order is fixed and load-bearing: 1 Verdict, 2 Analyst summaries,
+3 Bull vs Bear, 4 Trade proposal, 5 Risk review, 6 Options view (M4+),
+7 Data sources used + timestamps. The disclaimer footer is mandatory and
+verbatim on every file that carries a recommendation.
+"""
+
+from __future__ import annotations
+
+from ..pipeline.analysts import stance_spread
+from ..pipeline.deep import DeepResult
+from .render import DISCLAIMER
+
+
+def _verdict(result: DeepResult) -> str:
+    lines = ["## 1. Verdict", ""]
+    decision = result.decision
+    if decision is None:
+        lines += [
+            "> **DEGRADED — no verdict this run.**",
+            "",
+            f"Reason: {result.decision_error or result.aborted or 'the pipeline did not complete'}.",
+            "",
+            "Nothing below should be read as a recommendation.",
+            "",
+        ]
+        return "\n".join(lines)
+
+    target = f"${decision.price_target:,.2f}" if decision.price_target is not None else "none stated"
+    lines += [
+        f"### **{decision.rating}** · soft price target {target} · confidence **{decision.confidence}**",
+        "",
+        f"**Horizon:** {decision.time_horizon or 'not stated'}",
+        "",
+        decision.executive_summary,
+        "",
+        "**Thesis**",
+        "",
+        decision.investment_thesis,
+        "",
+        f"**Invalidation:** {decision.invalidation}",
+        "",
+    ]
+    if result.degraded:
+        lines += [
+            "> **DEGRADED** — this verdict was formed on incomplete evidence: "
+            + "; ".join(result.degraded_reasons())
+            + ".",
+            "",
+        ]
+    return "\n".join(lines)
+
+
+def _analysts(result: DeepResult) -> str:
+    lines = ["## 2. Analyst Summaries", ""]
+    if not result.analysts:
+        lines += ["_No analyst ran for this ticker._", ""]
+        return "\n".join(lines)
+
+    lines += [f"**Stance spread:** {stance_spread(result.analysts)}", ""]
+    for a in result.analysts:
+        lines.append(f"### {a.label}")
+        if a.report is None:
+            lines += [f"> **DEGRADED** — no report: {a.error or 'LLM call failed'}", ""]
+            continue
+        lines += [
+            f"_{a.report.stance}, confidence {a.report.confidence}_",
+            "",
+            a.report.summary,
+            "",
+        ]
+        lines += [f"- {point}" for point in a.report.key_points]
+        if a.report.evidence_gaps.strip().lower() != "none":
+            lines.append(f"- _Gaps: {a.report.evidence_gaps}_")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _debate(result: DeepResult) -> str:
+    lines = ["## 3. Bull vs Bear", ""]
+    debate = result.debate
+    if debate is None:
+        lines += ["_No debate took place._", ""]
+        return "\n".join(lines)
+
+    lines += [
+        f"_{debate.rounds} round(s), {len([t for t in debate.turns if t.turn])} of "
+        f"{len(debate.turns)} turns on the record._",
+        "",
+        f"**Bull's strongest argument:** {debate.strongest('Bull')}",
+        "",
+        f"**Bear's strongest argument:** {debate.strongest('Bear')}",
+        "",
+        "### Arbiter's resolution (research manager)",
+        "",
+    ]
+    if debate.plan is None:
+        lines += [f"> **DEGRADED** — no ruling: {debate.plan_error or 'LLM call failed'}", ""]
+    else:
+        lines += [
+            f"**Recommendation: {debate.plan.recommendation}**",
+            "",
+            debate.plan.resolution,
+            "",
+            f"**Instructions to the trader:** {debate.plan.strategic_actions}",
+            "",
+        ]
+
+    lines += ["<details>", "<summary>Full debate transcript</summary>", ""]
+    for turn in debate.turns:
+        lines += [turn.transcript_entry(), ""]
+    lines += ["</details>", ""]
+    return "\n".join(lines)
+
+
+def _proposal(result: DeepResult) -> str:
+    lines = ["## 4. Trade Proposal", ""]
+    proposal = result.proposal
+    if proposal is None:
+        lines += [
+            f"> **DEGRADED** — no proposal: {result.proposal_error or 'the trader did not run'}",
+            "",
+        ]
+        return "\n".join(lines)
+    entry = f"${proposal.entry_price:,.2f}" if proposal.entry_price is not None else "not specified"
+    stop = f"${proposal.stop_loss:,.2f}" if proposal.stop_loss is not None else "not specified"
+    risk = ""
+    if proposal.entry_price and proposal.stop_loss and proposal.entry_price > 0:
+        risk = f" ({(1 - proposal.stop_loss / proposal.entry_price) * 100:.1f}% risk per share)"
+    lines += [
+        f"**Action: {proposal.action}**",
+        "",
+        proposal.reasoning,
+        "",
+        "| Field | Value |",
+        "|---|---|",
+        f"| Entry reference | {entry} |",
+        f"| Stop loss | {stop}{risk} |",
+        f"| Sizing | {proposal.position_sizing or 'not specified'} |",
+        "",
+        "_A proposal for a human to evaluate. This tool has no order path; the Alpaca "
+        "integration is paper-only and read-only._",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _risk(result: DeepResult) -> str:
+    lines = ["## 5. Risk Review", ""]
+    review = result.risk
+    if review is None or not review.voices:
+        lines += ["_The risk committee did not sit._", ""]
+        return "\n".join(lines)
+
+    for voice in review.voices:
+        lines.append(f"### {voice.seat} Risk Analyst")
+        if voice.take is None:
+            lines += [f"> **DEGRADED** — no critique: {voice.error or 'LLM call failed'}", ""]
+            continue
+        lines += [
+            voice.take.argument,
+            "",
+            f"**Wants changed:** {voice.take.recommended_adjustment}",
+            "",
+        ]
+
+    lines += ["### Judge's ruling (portfolio manager)", ""]
+    if result.decision is None:
+        lines += [
+            f"> **DEGRADED** — no ruling: {result.decision_error or 'the portfolio manager did not run'}",
+            "",
+        ]
+    else:
+        lines += [result.decision.risk_ruling, ""]
+    return "\n".join(lines)
+
+
+def _options() -> str:
+    return (
+        "## 6. Options View\n\n"
+        "_Not yet implemented — Milestone 4 adds cash-secured put and covered-call "
+        "candidates from Alpaca paper option chains._\n"
+    )
+
+
+def _sources(result: DeepResult) -> str:
+    lines = ["## 7. Data Sources", ""]
+    lines.append(
+        result.evidence.sources() if result.evidence else "_No evidence pack was built._"
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _footer(result: DeepResult, brief_path: str) -> str:
+    lines = [
+        "---",
+        "",
+        "### Run footer",
+        "",
+        f"- **Ticker runtime:** {result.seconds:.1f}s · **LLM calls:** {result.total_calls} · "
+        f"**Tokens:** {result.total_tokens:,} · **Est. cost:** ${result.total_cost_usd:.4f}",
+        f"- **Daily brief:** [{brief_path}]({brief_path})",
+        "",
+        "| Tier | Calls | Prompt tok | Completion tok | Est. cost |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for tier in ("fast", "smart", "deep"):
+        cost = result.cost_by_tier.get(tier)
+        if not cost:
+            continue
+        lines.append(
+            f"| {tier} | {cost.calls} | {cost.prompt_tokens:,} | "
+            f"{cost.completion_tokens:,} | ${cost.cost_usd:.4f} |"
+        )
+    lines += ["", f"_{DISCLAIMER}_", ""]
+    return "\n".join(lines)
+
+
+def render_deep_index(results: list[DeepResult]) -> str:
+    """Body of section 5 of the daily brief, once the deep stage has run."""
+    if not results:
+        return "_The deep stage ran but the discovery queue was empty; no ticker was analysed._"
+
+    lines = [
+        "| Ticker | Sector | Verdict | Target | Horizon | Trader | Report |",
+        "|---|---|---|---:|---|---|---|",
+    ]
+    for r in results:
+        d = r.decision
+        target = f"${d.price_target:,.2f}" if d and d.price_target is not None else "—"
+        lines.append(
+            f"| **{r.symbol}** | {r.queued.sector or '—'} | {r.verdict} | {target} | "
+            f"{(d.time_horizon if d else None) or '—'} | "
+            f"{r.proposal.action if r.proposal else '—'} | "
+            f"[deep/{r.symbol}.md](deep/{r.symbol}.md) |"
+        )
+    lines.append("")
+    for r in results:
+        if r.decision is not None:
+            lines.append(f"- **{r.symbol}** — {r.decision.executive_summary}")
+        else:
+            lines.append(
+                f"- **{r.symbol}** — DEGRADED: "
+                f"{r.decision_error or r.aborted or 'the pipeline did not complete'}"
+            )
+    total_cost = sum(r.total_cost_usd for r in results)
+    total_calls = sum(r.total_calls for r in results)
+    lines += [
+        "",
+        f"_{len(results)} ticker(s) · {total_calls} LLM calls · est. ${total_cost:.4f} "
+        f"(${total_cost / len(results):.4f} per ticker)._",
+    ]
+    return "\n".join(lines)
+
+
+def render_deep_report(result: DeepResult, brief_path: str = "../daily-brief.md") -> str:
+    q = result.queued
+    header = (
+        f"# {q.symbol} — {q.name or q.symbol}\n\n"
+        f"`{q.sector or 'unknown sector'} / {q.industry or 'unknown industry'}` · "
+        f"deep analysis for {result.evidence.run_date.isoformat() if result.evidence else 'n/a'}\n\n"
+        "> Research only. Paper trading. The human makes every decision.\n"
+    )
+    return "\n".join(
+        [
+            header,
+            _verdict(result),
+            _analysts(result),
+            _debate(result),
+            _proposal(result),
+            _risk(result),
+            _options(),
+            _sources(result),
+            _footer(result, brief_path),
+        ]
+    )

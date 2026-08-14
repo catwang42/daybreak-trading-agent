@@ -46,6 +46,11 @@ class ReportContext:
     paid_gaps: list[str] = field(default_factory=list)
     runtime_seconds: float = 0.0
     stage: str = "discovery"
+    max_per_sector: int = 3
+    deep_cap: int = 3
+    # Set once the deep stage has run in the same process (``--stage all``);
+    # a standalone ``--stage deep`` patches this section on disk instead.
+    deep_index: str | None = None
 
 
 def _pct(value: float | None, digits: int = 2) -> str:
@@ -86,7 +91,7 @@ def _section_market_overview(ctx: ReportContext) -> str:
     for c in b.components:
         score = f"{c.score:.0f}" if c.available else "—"
         lines.append(f"| {_component_label(c.key)} | {score} | {c.signal} |")
-    lines.append("")
+    lines += ["", f"> {b.history_note}", ""]
     return "\n".join(lines)
 
 
@@ -176,7 +181,8 @@ def _section_shortlist(ctx: ReportContext) -> str:
         "## 4. Shortlist",
         "",
         f"Screened {ctx.screened} of {ctx.universe_size} universe names; "
-        f"{len(ctx.candidates)} passed the momentum-burst filter; top {len(ctx.shortlist)} shown.",
+        f"{len(ctx.candidates)} passed the momentum-burst filter; top {len(ctx.shortlist)} shown "
+        f"(at most {ctx.max_per_sector} per sector).",
         "",
         "| Ticker | Sector | Why it surfaced | Signals (M3+) | Quick rating | Priority | Earnings |",
         "|---|---|---|---|---|---:|---|",
@@ -215,14 +221,25 @@ def _section_shortlist(ctx: ReportContext) -> str:
     return "\n".join(lines)
 
 
+DEEP_HEADING = "## 5. Deep Analysis"
+
+
 def _section_deep(ctx: ReportContext) -> str:
-    ranked = [e for e in ctx.shortlist if e.take][:5]
-    queue = ", ".join(f"{e.symbol} ({e.priority}/10)" for e in ranked) or "none"
+    from ..discovery.shortlist import deep_dive_queue
+
+    if ctx.deep_index is not None:
+        return f"{DEEP_HEADING}\n\n{ctx.deep_index}\n"
+
+    queued = deep_dive_queue(ctx.shortlist, ctx.sector_map, cap=ctx.deep_cap)
+    queue = (
+        ", ".join(f"{e.symbol} ({e.candidate.sector}, priority {e.priority}/10)" for e in queued)
+        or "none"
+    )
     return (
-        "## 5. Deep Analysis\n\n"
-        "_Not yet implemented — Milestone 2 ports the TradingAgents pipeline and writes "
-        "`deep/<ticker>.md` per ticker._\n\n"
-        f"Deep-analysis queue by priority: {queue}\n"
+        f"{DEEP_HEADING}\n\n"
+        "_Not run in this stage — `--stage deep` executes the ported TradingAgents pipeline and "
+        "writes `deep/<ticker>.md` per ticker._\n\n"
+        f"Deep-analysis queue (round-robin across leading sectors): {queue}\n"
     )
 
 

@@ -56,6 +56,9 @@ def main(
     skip_llm: bool = typer.Option(
         False, "--skip-llm", help="Run data + screening with zero LLM spend."
     ),
+    tickers: Optional[str] = typer.Option(
+        None, "--tickers", help="Comma-separated deep-stage override, e.g. 'ADSK,V,FDX'."
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging."),
 ) -> None:
     _configure_logging(verbose)
@@ -73,18 +76,42 @@ def main(
         typer.secho(f"Configuration refused: {exc}", fg="red", err=True)
         raise typer.Exit(2)
 
-    if stage in (Stage.deep, Stage.options):
-        typer.secho(
-            f"Stage '{stage.value}' is not implemented yet (Milestone "
-            f"{'2' if stage is Stage.deep else '4'}).",
-            fg="yellow",
-            err=True,
-        )
+    if stage is Stage.options:
+        typer.secho("Stage 'options' is not implemented yet (Milestone 4).", fg="yellow", err=True)
         raise typer.Exit(1)
 
-    from .stages import run_discovery
-
+    only = [t.strip().upper() for t in tickers.split(",") if t.strip()] if tickers else None
     log.info("Stage=%s date=%s paper=%s", stage.value, settings.run_date, settings.alpaca_paper)
+
+    from .stages import run_all, run_deep, run_discovery
+
+    if stage is Stage.deep:
+        if skip_llm:
+            typer.secho("--skip-llm makes the deep stage a no-op; nothing to run.", fg="red", err=True)
+            raise typer.Exit(2)
+        try:
+            deep = run_deep(settings, only=only)
+        except FileNotFoundError as exc:
+            typer.secho(str(exc), fg="red", err=True)
+            raise typer.Exit(2)
+        _echo_deep(settings, deep)
+        return
+
+    if stage is Stage.all:
+        if skip_llm:
+            typer.secho("--skip-llm makes the deep stage a no-op; nothing to run.", fg="red", err=True)
+            raise typer.Exit(2)
+        discovery, deep = run_all(
+            settings,
+            refresh_universe=refresh_universe,
+            universe_limit=universe_limit,
+            shortlist_size=shortlist_size,
+            only=only,
+        )
+        _echo_discovery(settings, discovery)
+        _echo_deep(settings, deep)
+        return
+
     result = run_discovery(
         settings,
         refresh_universe=refresh_universe,
@@ -92,7 +119,10 @@ def main(
         shortlist_size=shortlist_size,
         skip_llm=skip_llm,
     )
+    _echo_discovery(settings, result)
 
+
+def _echo_discovery(settings, result) -> None:
     ctx = result.context
     typer.echo("")
     typer.secho(f"Report:   {result.report_path}", fg="green")
@@ -107,6 +137,37 @@ def main(
     )
     if ctx.degraded.entries:
         typer.secho(f"DEGRADED: {', '.join(ctx.degraded.sources)}", fg="yellow")
+
+
+def _echo_deep(settings, deep) -> None:
+    typer.echo("")
+    typer.secho(f"Deep:     {len(deep.results)} ticker(s) in {deep.seconds:.1f}s", fg="green")
+    for result in deep.results:
+        typer.echo(
+            f"  {result.symbol:<6} {result.verdict:<18} {result.total_calls:>2} calls · "
+            f"{result.total_tokens:>7,} tok · ${result.total_cost_usd:.4f} · {result.seconds:.0f}s"
+        )
+    for path in deep.report_paths:
+        typer.echo(f"  -> {path}")
+    typer.echo(f"Brief:    {deep.brief_path}")
+    typer.echo(f"Journal:  {deep.journal_written} deep entries -> {settings.journal_path}")
+    if deep.ledger is not None:
+        typer.echo("")
+        typer.echo("  Tier   Calls   Prompt tok  Completion tok   Est. cost")
+        for tier in ("fast", "smart", "deep"):
+            usage = deep.ledger.by_tier.get(tier)
+            if not usage:
+                continue
+            typer.echo(
+                f"  {tier:<6} {usage.calls:>5}   {usage.prompt_tokens:>10,}  "
+                f"{usage.completion_tokens:>14,}   ${usage.cost_usd:>8.4f}"
+            )
+        typer.echo(
+            f"  total  {deep.ledger.total_calls:>5}   "
+            f"{deep.ledger.total_tokens:>26,}   ${deep.ledger.total_cost_usd:>8.4f}"
+        )
+    if deep.degraded.entries:
+        typer.secho(f"DEGRADED: {', '.join(deep.degraded.sources)}", fg="yellow")
 
 
 if __name__ == "__main__":

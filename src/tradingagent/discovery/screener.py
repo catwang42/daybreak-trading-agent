@@ -36,6 +36,11 @@ MAX_PREV_DAY_GAIN_FOR_RANGE = 3.0
 BREAKDOWN_LOOKBACK_DAYS = 5
 BREAKDOWN_THRESHOLD_PCT = -4.0
 
+# Gate 1 review: an unconstrained top-10 came back entirely Financials, because a
+# hot sector triggers most of its members on the same day. The shortlist is a
+# deep-dive queue, not a ranking, so concentration costs us coverage.
+MAX_PER_SECTOR = 3
+
 RATING_BANDS: list[tuple[int, str, str]] = [
     (90, "A", "ACTIONABLE_DAY1"),
     (80, "A-", "ACTIONABLE_DAY1"),
@@ -420,6 +425,27 @@ def screen_universe(
             continue
         out.append(candidate)
     out.sort(key=lambda c: (c.preferred_sector, c.score), reverse=True)
+    return out
+
+
+def cap_per_sector(
+    candidates: list[Candidate], max_per_sector: int = MAX_PER_SECTOR
+) -> list[Candidate]:
+    """Keep at most ``max_per_sector`` names per GICS sector, order preserved.
+
+    Applied to the shortlist only — ``screen_universe`` still returns everything
+    that passed, so the report's "N passed the filter" count stays honest.
+    """
+    if max_per_sector <= 0:
+        return list(candidates)
+    seen: dict[str, int] = {}
+    out: list[Candidate] = []
+    for candidate in candidates:
+        count = seen.get(candidate.sector, 0)
+        if count >= max_per_sector:
+            continue
+        seen[candidate.sector] = count + 1
+        out.append(candidate)
     return out
 
 

@@ -86,6 +86,52 @@ def _earnings_note(view: CalendarView, symbol: str, run_date: date) -> tuple[str
     )
 
 
+def quick_take_prompt(
+    candidate: Candidate,
+    breadth: BreadthResult,
+    sector_map: SectorMap,
+    earnings_note: str,
+    news_note: str,
+) -> str:
+    """Render the quick-take prompt. Shared with the tier A/B harness."""
+    return render(
+        "quick_take",
+        symbol=candidate.symbol,
+        name=candidate.name,
+        sector=candidate.sector,
+        industry=candidate.industry,
+        price=candidate.price,
+        day_gain_pct=candidate.day_gain_pct,
+        score=candidate.score,
+        rating=candidate.rating,
+        state=candidate.state,
+        triggers=", ".join(candidate.triggers) or "none",
+        volume_ratio_20d=candidate.volume_ratio_20d,
+        close_location_pct=candidate.close_location_pct,
+        prior_base_days=candidate.prior_base_days,
+        base_width_pct=candidate.base_width_pct,
+        entry_ref=candidate.entry_ref,
+        stop_ref=candidate.stop_ref,
+        risk_pct=candidate.risk_pct,
+        dist_52w_high_pct=candidate.dist_52w_high_pct if candidate.dist_52w_high_pct is not None else 0.0,
+        trend_note=_trend_note(candidate),
+        rs_note=(
+            f"{candidate.rs_vs_spy_3mo:+.1f} percentage points"
+            if candidate.rs_vs_spy_3mo is not None
+            else "unavailable"
+        ),
+        reject_reasons=", ".join(candidate.reject_reasons) or "none",
+        breadth_composite=breadth.composite,
+        breadth_zone=breadth.zone,
+        breadth_guidance=breadth.guidance,
+        risk_regime=sector_map.risk_regime,
+        cycle_phase=sector_map.cycle_phase,
+        sector_note=_sector_note(sector_map, candidate.sector),
+        earnings_note=earnings_note,
+        news_note=news_note,
+    )
+
+
 def build_shortlist(
     candidates: list[Candidate],
     breadth: BreadthResult,
@@ -105,43 +151,7 @@ def build_shortlist(
         news_note = (
             " | ".join(f"{n.headline} ({n.source})" for n in news) if news else "none retrieved"
         )
-
-        prompt = render(
-            "quick_take",
-            symbol=candidate.symbol,
-            name=candidate.name,
-            sector=candidate.sector,
-            industry=candidate.industry,
-            price=candidate.price,
-            day_gain_pct=candidate.day_gain_pct,
-            score=candidate.score,
-            rating=candidate.rating,
-            state=candidate.state,
-            triggers=", ".join(candidate.triggers) or "none",
-            volume_ratio_20d=candidate.volume_ratio_20d,
-            close_location_pct=candidate.close_location_pct,
-            prior_base_days=candidate.prior_base_days,
-            base_width_pct=candidate.base_width_pct,
-            entry_ref=candidate.entry_ref,
-            stop_ref=candidate.stop_ref,
-            risk_pct=candidate.risk_pct,
-            dist_52w_high_pct=candidate.dist_52w_high_pct if candidate.dist_52w_high_pct is not None else 0.0,
-            trend_note=_trend_note(candidate),
-            rs_note=(
-                f"{candidate.rs_vs_spy_3mo:+.1f} percentage points"
-                if candidate.rs_vs_spy_3mo is not None
-                else "unavailable"
-            ),
-            reject_reasons=", ".join(candidate.reject_reasons) or "none",
-            breadth_composite=breadth.composite,
-            breadth_zone=breadth.zone,
-            breadth_guidance=breadth.guidance,
-            risk_regime=sector_map.risk_regime,
-            cycle_phase=sector_map.cycle_phase,
-            sector_note=_sector_note(sector_map, candidate.sector),
-            earnings_note=earnings_note,
-            news_note=news_note,
-        )
+        prompt = quick_take_prompt(candidate, breadth, sector_map, earnings_note, news_note)
 
         take: QuickTake | None = None
         reason: str | None = None
@@ -170,6 +180,47 @@ def build_shortlist(
         reverse=True,
     )
     return entries
+
+
+def deep_dive_queue(
+    entries: list[ShortlistEntry],
+    sector_map: SectorMap | None = None,
+    cap: int = 5,
+) -> list[ShortlistEntry]:
+    """Order the deep-analysis queue so it spans sectors instead of stacking one.
+
+    Round-robin: the best name from each represented sector first (sectors taken
+    in momentum order, leaders first), then second names, and so on. Within a
+    sector the incoming order — priority, then rating, then screener score — is
+    preserved. Entries with no quick take are never queued for a deep dive.
+    """
+    ranked = [e for e in entries if e.take is not None]
+    if not ranked:
+        return []
+
+    by_sector: dict[str, list[ShortlistEntry]] = {}
+    for entry in ranked:
+        by_sector.setdefault(entry.candidate.sector, []).append(entry)
+
+    momentum_rank = {row.sector: i for i, row in enumerate(sector_map.rows)} if sector_map else {}
+    first_seen = {sector: ranked.index(group[0]) for sector, group in by_sector.items()}
+    sectors = sorted(
+        by_sector,
+        # Sectors absent from the map sort last but keep their shortlist order.
+        key=lambda s: (momentum_rank.get(s, len(momentum_rank)), first_seen[s]),
+    )
+
+    out: list[ShortlistEntry] = []
+    depth = 0
+    while len(out) < cap and depth < max(len(g) for g in by_sector.values()):
+        for sector in sectors:
+            group = by_sector[sector]
+            if depth < len(group):
+                out.append(group[depth])
+                if len(out) == cap:
+                    return out
+        depth += 1
+    return out
 
 
 def _trend_note(candidate: Candidate) -> str:

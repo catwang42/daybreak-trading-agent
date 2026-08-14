@@ -13,25 +13,31 @@
 | staskh trading_skills | github.com/staskh/trading_skills | `658dcc1` | 2026-07-30 |
 
 ## Pipeline mapping (TradingAgents → src/tradingagent/pipeline/)
-| Upstream | Local module / prompt file | Changes | Data swapped |
-|---|---|---|---|
-| fundamentals analyst | pipeline/analysts.py + prompts/analyst_fundamentals.md | M2 | Alpha Vantage → yfinance/Alpaca |
-| technical analyst | prompts/analyst_technical.md | M2 | |
-| news analyst | prompts/analyst_news.md | M2 | Finnhub + signal bundle (M3) |
-| sentiment analyst | prompts/analyst_sentiment.md | M2 | Reddit/PRAW (M3) |
-| bull/bear researchers | pipeline/debate.py + prompts/researcher_bull.md / _bear.md | rounds capped 1–2 | |
-| research manager | pipeline/debate.py (arbiter) | M2 | |
-| trader | pipeline/trader.py + prompts/trader.md | M2 | |
-| risk agg/cons/neutral + judge | pipeline/risk.py + prompts/risk_*.md | M2 | |
-| portfolio manager | pipeline/portfolio_manager.py + prompts/portfolio_manager.md | 5-tier + soft target per report-schema | |
-| LangGraph state machine | main.py stage orchestration + pydantic schemas | deliberate simplification | |
 
-**M1 status:** nothing from TradingAgents is ported yet. What M1 *did* take from it is
-structural: the "one analyst = one plain-text prompt + one pydantic schema, called
-through a single gateway" shape used by `pipeline/prompts_loader.py`,
-`pipeline/prompts/quick_take.md`, and `discovery/shortlist.QuickTake`. The M1 quick-take
-is a single FAST-tier call, not a debate — it exists to rank the deep-dive queue that M2
-will consume.
+Upstream paths are relative to `reference/TradingAgents/tradingagents/`. Tier is ours,
+set by CLAUDE.md's cost policy; upstream runs one "quick" and one "deep" model.
+
+| Upstream | Local module / prompt file | Tier | Changes | Data swapped |
+|---|---|---|---|---|
+| `agents/analysts/market_analyst.py` | pipeline/analysts.py + prompts/analyst_technical.md | FAST | tool belt → pre-computed indicator table | its 8 `get_stockstats_*` tools → data/indicators.py (pure pandas over the yfinance pull) |
+| `agents/analysts/fundamentals_analyst.py` | prompts/analyst_fundamentals.md | FAST | same | SimFin/Finnhub premium statements → data/fundamentals.py (yfinance free tier) |
+| `agents/analysts/news_analyst.py` | prompts/analyst_news.md | FAST | same; macro read folded into the shared market-context block | Google News + Finnhub premium → Finnhub free company news + our breadth/sector context |
+| `agents/analysts/sentiment_analyst.py` + `social_media_analyst.py` | prompts/analyst_sentiment.md | FAST | two upstream seats merged into one | Reddit/StockTwits → sell-side posture, target dispersion, short interest, holder mix (M3 adds PRAW) |
+| `agents/researchers/bull_researcher.py` / `bear_researcher.py` | pipeline/debate.py + prompts/researcher_bull.md / _bear.md | SMART | rounds capped 1 default / 2 max; each turn must name a concession | memory recall dropped (see deviations) |
+| `agents/managers/research_manager.py` | pipeline/debate.py (`run_debate` arbiter) + prompts/research_manager.md | SMART | emits the 5-tier rating, not upstream's free-text verdict | |
+| `agents/trader/trader.py` | pipeline/trader.py + prompts/trader.md | SMART | Buy/Hold/Sell + entry, stop, sizing as typed fields | |
+| `agents/risk_mgmt/aggressive_debator.py` / `conservative_debator.py` / `neutral_debator.py` | pipeline/risk.py + prompts/risk_aggressive.md / _conservative.md / _neutral.md | SMART | one sequential pass (upstream's `3 * max_risk_discuss_rounds` with rounds=1) | |
+| `agents/managers/portfolio_manager.py` (risk judge) | pipeline/portfolio_manager.py + prompts/portfolio_manager.md | DEEP | 5-tier rating + confidence + soft price target per `config/report-schema.md`; the risk ruling is folded in here rather than a separate judge seat | |
+| `agents/schemas.py`, `agents/utils/structured.py`, `agents/utils/rating.py` | pipeline/schemas.py | — | every role typed, not just the three decision-makers; retry policy is exactly one re-prompt then DEGRADED | |
+| `graph/trading_graph.py`, `graph/setup.py`, `graph/conditional_logic.py`, `graph/propagation.py` | pipeline/deep.py + stages.py | — | LangGraph state machine → straight-line Python; upstream's debate-termination arithmetic is reproduced in `run_debate` / `run_risk_committee` | |
+| `agents/utils/agent_utils.py` (toolkit) | pipeline/evidence.py | — | tool calls → one pre-computed evidence pack per ticker | |
+| `graph/reflection.py`, `agents/utils/memory.py` | — | — | not ported (M3) | |
+
+**M1 status (unchanged):** M1 took nothing from TradingAgents but its shape — "one
+analyst = one plain-text prompt + one pydantic schema, called through a single gateway" —
+used by `pipeline/prompts_loader.py`, `pipeline/prompts/quick_take.md`, and
+`discovery/shortlist.QuickTake`. The quick take is a single FAST-tier call that ranks the
+deep-dive queue M2 consumes.
 
 ## Discovery mapping (tradermonty → src/tradingagent/discovery/)
 | Skill | Local module | Notes |
@@ -90,6 +96,37 @@ will consume.
 - **No LangGraph, no agent framework.** Stage orchestration is plain Python in
   `stages.py`; every LLM call goes through `llm.LLMGateway` so the provider stays an env
   variable.
+- **Tool-calling analysts → a pre-computed evidence pack.** This is the largest M2
+  deviation. Upstream binds ~20 tools to the four analysts and lets each decide what to
+  fetch inside a LangGraph loop; the number of LLM calls per analyst is therefore
+  unbounded. We have no agent framework and a per-ticker cost target, so
+  `pipeline/evidence.py` fetches everything once per ticker — 2y of bars, 13 indicators,
+  fundamentals, quarterly trend, positioning, company news — and injects the relevant
+  rendered slice into each analyst's prompt. Cost: an analyst cannot chase a follow-up
+  question, so the evidence menu is fixed at design time rather than at run time.
+  Benefit: exactly 12 LLM calls per ticker, known in advance, and every analyst is
+  reasoning over the same validated numbers. Each analyst reports `evidence_gaps`, which
+  is where a missing tool would show up.
+- **Analyst prose is length-capped and the cap is stated in characters.** Each role's
+  output feeds the next role's prompt, so an unbounded analyst report inflates all eleven
+  downstream calls. The budget lives in the pydantic field description in the same unit
+  the validator enforces — an early CRM run capped `risk_ruling` at 900 characters while
+  telling the model nothing, overran it twice, and lost the verdict to DEGRADED.
+- **No reflection or memory.** Upstream's `graph/reflection.py` and
+  `agents/utils/memory.py` embed past decisions and their P&L into a vector store and
+  recall similar situations into each researcher's prompt. We have no realised outcomes
+  to reflect on until the journal has history, so M2 writes the journal and skips the
+  recall. Deferred to M3.
+- **Risk judge merged into the portfolio manager.** Upstream runs three risk debators and
+  then a separate judge. We keep the three seats and let the portfolio manager rule on
+  them in the same DEEP-tier call, saving one DEEP call per ticker (the most expensive
+  tier) for a decision that was already the PM's to make. The ruling is a required field
+  (`risk_ruling`), so it cannot be skipped.
+- **Sentiment analyst reads positioning, not social media.** Upstream has separate
+  sentiment and social-media seats over Reddit and StockTwits. Free, reliable social data
+  is the gap; until PRAW lands in M3 the single merged seat reads sell-side posture,
+  target dispersion, short interest and holder mix — positioning rather than chatter. The
+  report says so rather than implying a social read happened.
 - **Screener liquidity floor uses average *share* volume**, per `config/preferences.md`
   (1M shares), not the dollar-volume floor some upstream variants use.
 

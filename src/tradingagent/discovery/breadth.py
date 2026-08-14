@@ -66,6 +66,22 @@ class BreadthResult:
     ma200: float | None = None
     universe_size: int = 0
     data_quality: str = ""
+    history_sessions: int = 0
+
+    @property
+    def history_note(self) -> str:
+        """Inline caveat: the percentile and cycle components are window-bound."""
+        if self.history_sessions < 120:
+            return (
+                "Breadth history is too short to rank today's reading against a "
+                "meaningful sample; treat the composite as indicative only."
+            )
+        return (
+            f"Percentile and cycle-position components are ranked against the trailing "
+            f"{self.history_sessions} sessions ({_years(self.history_sessions)}) of breadth "
+            "history we compute ourselves — less than one full market cycle, so an "
+            "\"84th percentile\" reading means 84th of this window, not of all time."
+        )
 
     @property
     def strongest(self) -> Component | None:
@@ -206,10 +222,25 @@ def component_bearish_signal(ratio: pd.Series, ma8: pd.Series, ma200: pd.Series)
 
 
 def component_percentile(ma8: pd.Series) -> Component:
+    """Percentile rank of today's 8MA within the history we actually hold.
+
+    Upstream ranks against years of hosted breadth history. Ours is bounded by
+    the OHLCV window we download (2y), which is less than one full market cycle
+    — so the signal states its own sample size rather than implying "all time".
+    """
     if len(ma8) < 120:
         return Component("historical_percentile", 50, "NO DATA", available=False)
     pct = float((ma8 < float(ma8.iloc[-1])).mean()) * 100
-    return Component("historical_percentile", pct, f"{pct:.0f}th percentile of available history")
+    return Component(
+        "historical_percentile",
+        pct,
+        f"{pct:.0f}th percentile of the trailing {len(ma8)} sessions "
+        f"({_years(len(ma8))} of history — less than one full cycle)",
+    )
+
+
+def _years(sessions: int) -> str:
+    return f"~{sessions / 252:.1f}y"
 
 
 def component_divergence(ma8: pd.Series, spx_close: pd.Series | None) -> Component:
@@ -308,4 +339,5 @@ def analyze_breadth(bars: dict[str, pd.DataFrame], spx_close: pd.Series | None =
         ma200=float(valid_200.iloc[-1]) if not valid_200.empty else None,
         universe_size=len(bars),
         data_quality=quality,
+        history_sessions=len(ma8),
     )
