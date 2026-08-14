@@ -1,0 +1,11 @@
+# pinned by Claude Code during Milestone 1
+litellm
+yfinance
+alpaca-py
+finnhub-python
+pandas
+typer
+pydantic
+tenacity
+python-dotenv
+feedparser

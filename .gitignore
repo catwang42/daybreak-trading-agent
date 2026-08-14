@@ -1,0 +1,10 @@
+config/.env
+reference/*/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+reports/*
+!reports/.gitkeep
+.gcloud/

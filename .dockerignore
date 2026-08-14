@@ -1,0 +1,8 @@
+.venv
+venv
+reference
+reports
+journal
+tests
+.git
+config/.env
