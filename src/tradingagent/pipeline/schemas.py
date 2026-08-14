@@ -202,9 +202,10 @@ class PortfolioDecision(BaseModel):
     )
     confidence: Confidence = Field(
         description=(
-            "H only when the analysts, the debate, and the risk team point the "
-            "same way on complete evidence; L when the inputs conflict or a "
-            "source was degraded."
+            "Read off the confidence conditions supplied in the prompt: H when 5 "
+            "or 6 of the six hold, M when 3 or 4 hold, L when 2 or fewer hold. "
+            "Move one step off that band only if you name the condition you are "
+            "overriding."
         )
     )
     price_target: float | None = Field(

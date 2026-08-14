@@ -30,6 +30,9 @@ this note, and the tool has no live-trading path.
 ## Evidence quality this run
 {degraded_note}
 
+## Confidence conditions — {confirmed} of {total_conditions} hold
+{confidence_checklist}
+
 ## Your task
 Deliver the verdict.
 
@@ -42,10 +45,20 @@ the stop, or the timing.
 balanced or too thin to act on; it is not a way to avoid being wrong. If you
 rate Hold, say what specifically is missing or unresolved.
 
-**Discipline the confidence.** Reserve H for cases where the analysts, the
-debate, and the risk committee point the same way on complete evidence. If a
-data source was degraded, or the analysts contradicted each other, that is L or
-M — and the reason belongs in the thesis.
+**Set the confidence off the conditions, not off your mood.** Count the
+confidence conditions listed above:
+
+- **H** — 5 or 6 hold.
+- **M** — 3 or 4 hold.
+- **L** — 2 or fewer hold.
+
+Two things this rule deliberately does not count: that the bull and the bear
+disagreed (they are instructed to, so it can never signal anything), and that
+social-media sentiment was unavailable (it is unavailable every run). Apply the
+band as counted. You may move one step off it, but only by naming the specific
+condition you are overriding and why — "the evidence feels mixed" is not a
+reason, and a verdict that always lands on M is a verdict that carries no
+information.
 
 **A price target is a claim, not a decoration.** Give one only if the evidence
 supports it, anchored on a level or a multiple you can name, for the horizon you

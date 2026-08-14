@@ -344,3 +344,118 @@ def test_the_analyst_digest_names_the_ones_that_did_not_report():
 def test_the_stance_spread_flags_agreement_between_the_analysts():
     results = run_analysts(FakeGateway(), evidence(), DegradedTracker())
     assert "unanimous" in stance_spread(results)
+
+
+# --- countable confidence and blocking gaps (Gate 2 pre-work) -------------
+
+
+def _analysts(stances, confidences=None):
+    from tradingagent.pipeline.analysts import AnalystResult
+
+    confidences = confidences or ["M"] * len(stances)
+    return [
+        AnalystResult(
+            key=f"a{i}",
+            label=f"Analyst {i}",
+            report=AnalystReport(
+                stance=stance, confidence=conf, summary="s",
+                key_points=["p1", "p2"], evidence_gaps="none",
+            ),
+        )
+        for i, (stance, conf) in enumerate(zip(stances, confidences))
+    ]
+
+
+def _risk(seats=3):
+    from tradingagent.pipeline.risk import RiskReview, RiskVoice
+
+    return RiskReview(voices=[
+        RiskVoice(seat=f"Seat{i}", round_number=1, take=SAMPLES[RiskTake]) for i in range(seats)
+    ])
+
+
+def _full_evidence():
+    from tradingagent.data.fundamentals import Fundamentals, Positioning
+    from tradingagent.data.finnhub_client import NewsItem
+
+    ev = evidence()
+    ev.fundamentals = Fundamentals(symbol="TST", missing=[])
+    ev.positioning = Positioning(symbol="TST")
+    ev.news = [NewsItem(symbol="TST", headline="h", source="src", url="u", datetime_utc=0)]
+    return ev
+
+
+def test_blocking_gaps_ignores_the_permanent_social_sentiment_limit():
+    """`missing` always names social sentiment; a confidence rubric must not count it."""
+    from tradingagent.pipeline.debate import DebateResult
+    from tradingagent.pipeline.portfolio_manager import confidence_checklist
+
+    ev = _full_evidence()
+    ev.missing.append("social/retail sentiment (not collected in this milestone)")
+    assert ev.blocking_gaps() == []
+
+    ev.news = []
+    assert ev.blocking_gaps() == ["company news"]
+
+    ev.indicators = None
+    ev.fundamentals = None
+    ev.positioning = None
+    assert set(ev.blocking_gaps()) == {
+        "price history", "company fundamentals", "positioning data", "company news",
+    }
+
+    # And the checklist condition tracks it, not `missing`.
+    debate = DebateResult(plan=SAMPLES[ResearchPlan])
+    lines, _, _ = confidence_checklist(
+        _full_evidence(), _analysts(["Bullish"] * 4), debate, SAMPLES[TraderProposal], _risk()
+    )
+    assert "- [x] no blocking data gaps in the evidence pack" in lines
+
+
+def test_confidence_checklist_reaches_the_high_band_on_a_clean_run():
+    from tradingagent.pipeline.debate import DebateResult
+    from tradingagent.pipeline.portfolio_manager import confidence_checklist
+
+    lines, held, total = confidence_checklist(
+        _full_evidence(),
+        _analysts(["Bullish", "Bullish", "Mildly Bullish", "Neutral"]),
+        DebateResult(plan=SAMPLES[ResearchPlan]),   # Overweight -> long
+        SAMPLES[TraderProposal],                    # Buy -> long
+        _risk(),
+    )
+    assert (held, total) == (6, 6)
+    assert all(line.startswith("- [x]") for line in lines)
+
+
+def test_confidence_checklist_reaches_the_low_band_on_a_thin_run():
+    from tradingagent.pipeline.debate import DebateResult
+    from tradingagent.pipeline.portfolio_manager import confidence_checklist
+
+    ev = evidence()  # no fundamentals, no positioning, no news
+    lines, held, total = confidence_checklist(
+        ev,
+        _analysts(["Bullish", "Bearish"], ["L", "M"]),
+        DebateResult(plan=None),
+        None,
+        _risk(seats=1),
+    )
+    assert (held, total) == (0, 6)
+    assert "L from Analyst 0" in "\n".join(lines)
+
+
+def test_confidence_checklist_counts_a_plan_trade_disagreement():
+    """The band has to be able to move; a direction split is what should move it."""
+    from tradingagent.pipeline.debate import DebateResult
+    from tradingagent.pipeline.portfolio_manager import confidence_checklist
+
+    plan = ResearchPlan(recommendation="Underweight", resolution="Bear carried it.",
+                        strategic_actions="Stand aside.")
+    lines, held, _ = confidence_checklist(
+        _full_evidence(),
+        _analysts(["Bullish", "Bullish", "Bullish", "Neutral"]),
+        DebateResult(plan=plan),          # short
+        SAMPLES[TraderProposal],          # Buy -> long
+        _risk(),
+    )
+    assert held == 5
+    assert "- [ ] research manager and trader agree in direction (plan short, trade long)" in lines

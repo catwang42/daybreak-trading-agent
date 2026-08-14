@@ -89,3 +89,32 @@ in order of how much they matter:
 Deferred deliberately: these change what the M1 shortlist means, and the M2 deep
 pipeline is the thing that should be judged at Gate 2. Revisit after Gate 2 with
 a week of journal entries to check whether priority actually predicts anything.
+
+---
+
+## Follow-up: implemented at Gate 2 pre-work (2026-08-14)
+
+Two of the three recommendations are now in the runtime.
+
+**Relative judgment.** `PoolStats` (in `discovery/shortlist.py`) computes the
+candidate's rank and percentile placement among the day's screened pool and
+renders it into the prompt as `{pool_note}`. The `rating` definition in
+`prompts/quick_take.md` is now explicitly relative — Buy is "the best two or
+three names in today's pool", Sell is "should not have passed the screen" —
+rather than an absolute market call. The vocabulary collision with the PM
+verdict remains; the placement wording in the prompt is what separates them.
+
+**Mechanical confidence.** `confirmation_checklist()` evaluates the six
+countable conditions this document proposed and renders them as checkbox lines
+with a running count. The prompt maps the count straight onto H/M/L. The same
+conjunctive-rubric defect turned up in the portfolio manager — every Gate 2
+verdict came back (M), because H required agreement across an adversarial
+debate on evidence that always reports the missing social-sentiment source —
+and is fixed the same way, via `confidence_checklist()` and
+`Evidence.blocking_gaps()`.
+
+**Not implemented:** dropping `rating` from `QuickTake`. It is cheap, it reads
+well in the brief, and the queue-ordering question this document raised (does
+`deep_dive_priority` predict anything?) still needs a week of journal outcomes
+to answer. The source-accuracy tracker landing in M3 is the machinery for that
+check; revisit once it has scored a week.

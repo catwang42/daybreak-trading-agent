@@ -69,6 +69,29 @@ class Evidence:
         """Below this bar there is nothing honest to analyse."""
         return self.indicators is not None
 
+    def blocking_gaps(self) -> list[str]:
+        """Sources that failed *this run*, as opposed to known milestone limits.
+
+        ``missing`` is the reader-facing list and always contains the social
+        sentiment line, because we genuinely never fetch it. Confidence rubrics
+        must not count that: a permanent entry in a "was anything missing?"
+        test makes high confidence permanently unreachable, which is exactly
+        how the Gate 2 verdicts all came back M. A couple of absent valuation
+        fields are not blocking either — the threshold matches the one
+        :class:`~tradingagent.data.fundamentals.FundamentalsClient` already
+        uses to call a snapshot sparse.
+        """
+        gaps = []
+        if self.indicators is None:
+            gaps.append("price history")
+        if self.fundamentals is None or len(self.fundamentals.missing) >= 4:
+            gaps.append("company fundamentals")
+        if self.positioning is None:
+            gaps.append("positioning data")
+        if not self.news:
+            gaps.append("company news")
+        return gaps
+
     # -- rendered slices, one per analyst --------------------------------
     def technical_block(self) -> str:
         parts = ["### Indicator set (daily bars)", ""]

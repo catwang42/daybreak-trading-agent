@@ -36,4 +36,6 @@ def _quick_take_fields():
         breadth_composite=70.0, breadth_zone="Healthy", breadth_guidance="Normal operations.",
         risk_regime="Risk-On", cycle_phase="Mid Cycle Expansion", sector_note="ranks 1/11",
         earnings_note="none in 10 days", news_note="none retrieved",
+        pool_note="32 candidates passed today's screen.", checklist="- [x] volume",
+        confirmed=5, total_confirmations=6,
     )

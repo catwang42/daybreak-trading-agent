@@ -62,6 +62,79 @@ class ShortlistEntry:
         return self.take.deep_dive_priority if self.take else 0
 
 
+@dataclass
+class PoolStats:
+    """Where today's candidates sit relative to each other.
+
+    The Gate 1 A/B showed the quick take returning the same rating and the same
+    confidence for every name, on both model tiers. The cause was the question:
+    an *absolute* Buy/…/Sell scale applied to a population the screener has
+    already made homogeneous can only produce the middle of the scale. Supplying
+    the pool lets the prompt ask a relative question instead.
+    """
+
+    size: int
+    best: int
+    median: int
+    worst: int
+
+    @classmethod
+    def build(cls, candidates: list[Candidate]) -> "PoolStats":
+        scores = sorted((c.score for c in candidates), reverse=True)
+        if not scores:
+            return cls(size=0, best=0, median=0, worst=0)
+        return cls(size=len(scores), best=scores[0], median=scores[len(scores) // 2], worst=scores[-1])
+
+    def note(self, candidate: Candidate, candidates: list[Candidate]) -> str:
+        if not self.size:
+            return "pool statistics unavailable"
+        better = sum(1 for c in candidates if c.score > candidate.score)
+        same_sector = sum(1 for c in candidates if c.sector == candidate.sector)
+        third = max(1, round(self.size / 3))
+        placement = (
+            "top third" if better < third
+            else "bottom third" if better >= self.size - third
+            else "middle third"
+        )
+        return (
+            f"{self.size} candidates passed today's screen. This one scores "
+            f"{candidate.score} and ranks {better + 1} of {self.size} — the {placement} "
+            f"of today's pool. Pool scores: best {self.best}, median {self.median}, "
+            f"worst {self.worst}. {same_sector} of today's candidates "
+            f"{'is' if same_sector == 1 else 'are'} in {candidate.sector}."
+        )
+
+
+# Countable confirmations behind the quick take's confidence. The Gate 1 A/B
+# found the old rubric ("H when the technical and regime evidence agree and
+# there is no earnings risk") unsatisfiable: the prompt also instructs
+# scepticism, and the context block always supplies at least one dissonant
+# fact, so M was the only reachable value on both tiers. These six are things
+# the screener already measured, so the model counts rather than judges.
+CONFIRMATIONS: tuple[tuple[str, str], ...] = (
+    ("volume", "volume at least 1.5x the 20-day average"),
+    ("close_location", "closed in the top 20% of the day's range"),
+    ("trend", "above both the 50-day and 200-day moving averages"),
+    ("relative_strength", "outperforming SPY over 3 months"),
+    ("base", "prior base no wider than 12%"),
+    ("no_earnings", "no confirmed earnings inside 10 days"),
+)
+
+
+def confirmation_checklist(candidate: Candidate, earnings_flag: str) -> tuple[list[str], int]:
+    """Render the six confirmations as checkbox lines, plus how many hold."""
+    checks = {
+        "volume": candidate.volume_ratio_20d >= 1.5,
+        "close_location": candidate.close_location_pct >= 80,
+        "trend": candidate.above_50dma and candidate.above_200dma,
+        "relative_strength": (candidate.rs_vs_spy_3mo or 0) > 0,
+        "base": 0 < candidate.base_width_pct <= 12,
+        "no_earnings": earnings_flag == "—",
+    }
+    lines = [f"- [{'x' if checks[key] else ' '}] {label}" for key, label in CONFIRMATIONS]
+    return lines, sum(checks.values())
+
+
 def _sector_note(sector_map: SectorMap, sector: str) -> str:
     row: SectorRow | None = next((r for r in sector_map.rows if r.sector == sector), None)
     if row is None:
@@ -92,10 +165,18 @@ def quick_take_prompt(
     sector_map: SectorMap,
     earnings_note: str,
     news_note: str,
+    pool: list[Candidate] | None = None,
+    earnings_flag: str = "—",
 ) -> str:
     """Render the quick-take prompt. Shared with the tier A/B harness."""
+    pool = pool if pool is not None else [candidate]
+    checklist, confirmed = confirmation_checklist(candidate, earnings_flag)
     return render(
         "quick_take",
+        pool_note=PoolStats.build(pool).note(candidate, pool),
+        checklist="\n".join(checklist),
+        confirmed=confirmed,
+        total_confirmations=len(CONFIRMATIONS),
         symbol=candidate.symbol,
         name=candidate.name,
         sector=candidate.sector,
@@ -151,12 +232,20 @@ def build_shortlist(
         news_note = (
             " | ".join(f"{n.headline} ({n.source})" for n in news) if news else "none retrieved"
         )
-        prompt = quick_take_prompt(candidate, breadth, sector_map, earnings_note, news_note)
+        prompt = quick_take_prompt(
+            candidate,
+            breadth,
+            sector_map,
+            earnings_note,
+            news_note,
+            pool=candidates,
+            earnings_flag=earnings_flag,
+        )
 
         take: QuickTake | None = None
         reason: str | None = None
         try:
-            take = gateway.complete(prompt, tier="fast", schema=QuickTake, max_tokens=700)
+            take = gateway.complete(prompt, tier="fast", schema=QuickTake)
         except LLMError as exc:
             reason = str(exc)[:200]
             degraded.add(f"Quick take {candidate.symbol}", reason)

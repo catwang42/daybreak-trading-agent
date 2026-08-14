@@ -366,3 +366,59 @@ def test_static_calendar_covers_the_window_and_flags_impact():
 def test_static_calendar_spans_a_month_boundary():
     events = static_release_calendar(date(2026, 12, 20), date(2027, 1, 10))
     assert any(e.date.year == 2027 for e in events)
+
+
+# --- relative ranking and countable confidence (Gate 2 pre-work) ----------
+
+
+def _pool_candidate(symbol, score, sector="Information Technology", **kw):
+    fields = dict(
+        symbol=symbol, name=symbol, sector=sector, industry="x", price=10.0, score=score,
+        rating="A", state="ACTIONABLE_DAY1", primary_trigger="4pct_breakout",
+    )
+    fields.update(kw)
+    return S.Candidate(**fields)
+
+
+def test_pool_note_places_a_candidate_relative_to_the_day():
+    from tradingagent.discovery.shortlist import PoolStats
+
+    pool = [_pool_candidate(f"S{i}", 95 - i * 5) for i in range(9)]  # 95 down to 55
+    stats = PoolStats.build(pool)
+    assert (stats.size, stats.best, stats.worst) == (9, 95, 55)
+
+    top = stats.note(pool[0], pool)
+    assert "ranks 1 of 9" in top and "top third" in top
+    assert "middle third" in stats.note(pool[4], pool)
+    assert "bottom third" in stats.note(pool[8], pool)
+
+
+def test_pool_note_counts_sector_crowding_and_survives_an_empty_pool():
+    from tradingagent.discovery.shortlist import PoolStats
+
+    pool = [_pool_candidate("A", 90), _pool_candidate("B", 80), _pool_candidate("C", 70, sector="Energy")]
+    note = PoolStats.build(pool).note(pool[0], pool)
+    assert "2 of today's candidates are in Information Technology" in note
+    assert "is in Energy" in PoolStats.build(pool).note(pool[2], pool)  # singular
+    assert PoolStats.build([]).note(pool[0], []) == "pool statistics unavailable"
+
+
+def test_confirmation_checklist_is_countable_and_reaches_both_ends():
+    from tradingagent.discovery.shortlist import CONFIRMATIONS, confirmation_checklist
+
+    strong = _pool_candidate(
+        "STRONG", 90, volume_ratio_20d=2.4, close_location_pct=93.0, above_50dma=True,
+        above_200dma=True, rs_vs_spy_3mo=12.0, base_width_pct=8.0,
+    )
+    lines, held = confirmation_checklist(strong, earnings_flag="—")
+    assert held == len(CONFIRMATIONS) == 6
+    assert all(line.startswith("- [x]") for line in lines)
+
+    # A confirmed earnings date alone knocks the count off the H band.
+    _, with_earnings = confirmation_checklist(strong, earnings_flag="2026-08-20 AMC")
+    assert with_earnings == 5
+
+    weak = _pool_candidate("WEAK", 60)  # every screener metric at its default
+    lines, held = confirmation_checklist(weak, earnings_flag="2026-08-20 AMC")
+    assert held == 0
+    assert all(line.startswith("- [ ]") for line in lines)
