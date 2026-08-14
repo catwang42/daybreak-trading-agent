@@ -1,0 +1,263 @@
+"""Assemble the per-ticker evidence pack the deep pipeline reasons over.
+
+This module is the load-bearing deviation from upstream. In
+`reference/TradingAgents` each analyst is a LangGraph node holding a toolbox
+(`get_stockstats_indicators_report`, `get_YFin_data`, `get_finnhub_news`, ...)
+and decides for itself what to fetch over several tool-calling turns. Our
+runtime has no graph and no tool loop — CLAUDE.md keeps the LLM layer to a
+single provider-agnostic `complete()` call — so we fetch everything once, up
+front, and hand each analyst a pre-rendered slice of it.
+
+What that costs: the analysts cannot chase a follow-up question, so the evidence
+menu is fixed by us rather than by them.
+What it buys: a bounded, predictable number of LLM calls per ticker, no
+provider-specific tool-calling API, and one place where every figure a report
+cites can be traced to a source and a timestamp (see :meth:`Evidence.sources`).
+
+Each block is rendered here, not in the prompt, so a missing source produces a
+visible "unavailable" line in the analyst's evidence rather than an absent
+section it cannot notice.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
+
+import pandas as pd
+
+from ..data.finnhub_client import FinnhubFree, NewsItem
+from ..data.fundamentals import Fundamentals, FundamentalsClient, Positioning
+from ..data.indicators import IndicatorSet, compute_indicators
+from ..data.market import MarketData
+from ..data.validate import DegradedTracker
+from .context import DeepContext, QueuedTicker
+
+log = logging.getLogger(__name__)
+
+# Enough history for a 200-day SMA plus a year of context for the percentile reads.
+DEEP_HISTORY = "2y"
+MIN_BARS = 60
+
+
+@dataclass
+class Evidence:
+    """Everything one ticker's analysts are allowed to see."""
+
+    queued: QueuedTicker
+    run_date: date
+    market_context: str
+    macro_note: str
+    indicators: IndicatorSet | None = None
+    fundamentals: Fundamentals | None = None
+    positioning: Positioning | None = None
+    news: list[NewsItem] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    source_notes: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def symbol(self) -> str:
+        return self.queued.symbol
+
+    @property
+    def price(self) -> float | None:
+        return self.indicators.close if self.indicators else None
+
+    @property
+    def usable(self) -> bool:
+        """Below this bar there is nothing honest to analyse."""
+        return self.indicators is not None
+
+    # -- rendered slices, one per analyst --------------------------------
+    def technical_block(self) -> str:
+        parts = ["### Indicator set (daily bars)", ""]
+        parts.append(
+            self.indicators.markdown() if self.indicators else "Price history unavailable."
+        )
+        parts += ["", "### What the screener saw this morning", "", self.queued.screener_markdown()]
+        return "\n".join(parts)
+
+    def fundamentals_block(self) -> str:
+        parts = ["### Company financials (free tier, may be trailing)", ""]
+        parts.append(
+            self.fundamentals.markdown() if self.fundamentals else "Fundamentals unavailable."
+        )
+        if self.price is not None:
+            parts += ["", f"Last close: ${self.price:,.2f}."]
+        return "\n".join(parts)
+
+    def news_block(self) -> str:
+        parts = ["### Company headlines (last 7 days)", ""]
+        if self.news:
+            for item in self.news:
+                stamp = _stamp(item.datetime_utc)
+                parts.append(f"- [{stamp}] {item.headline} ({item.source})")
+        else:
+            parts.append("- No headlines retrieved for this ticker in the window.")
+        parts += [
+            "",
+            "### Scheduled events",
+            "",
+            f"- Earnings: {self.queued.earnings_note}",
+            f"- Macro releases in the window:\n{_indent(self.macro_note)}",
+        ]
+        return "\n".join(parts)
+
+    def sentiment_block(self) -> str:
+        parts = ["### Sell-side posture and float positioning", ""]
+        parts.append(
+            self.positioning.markdown(self.price)
+            if self.positioning
+            else "Positioning data unavailable."
+        )
+        parts += ["", "### Crowding in the tape", ""]
+        if self.indicators:
+            mfi = self.indicators.get("mfi")
+            rsi = self.indicators.get("rsi")
+            parts += [
+                f"- Money Flow Index (14): {mfi:,.1f}" if mfi is not None else "- Money Flow Index: unavailable",
+                f"- RSI (14): {rsi:,.1f}" if rsi is not None else "- RSI: unavailable",
+            ]
+        parts += [
+            f"- Volume vs 20-day average: {self.queued.screener.get('volume_ratio_20d', 'unavailable')}",
+            f"- Close location in the day's range: {self.queued.screener.get('close_location_pct', 'unavailable')}%",
+            f"- Headlines retrieved in the last 7 days: {len(self.news)}",
+            "",
+            "### Coverage limit",
+            "",
+            "- No social-media or retail-forum data is available in this run. "
+            "Treat positioning proxies as the whole of your evidence.",
+        ]
+        return "\n".join(parts)
+
+    def price_context(self) -> str:
+        """Levels the trader, the risk committee and the manager all price against."""
+        if not self.indicators:
+            return "Price and level data unavailable for this ticker."
+        ind = self.indicators
+        s = self.queued.screener
+        atr = ind.get("atr")
+        lines = [
+            f"- Last close: ${ind.close:,.2f}",
+            f"- Screener entry reference: ${s.get('entry_ref', 'n/a')}, "
+            f"stop reference: ${s.get('stop_ref', 'n/a')} (risk {s.get('risk_pct', 'n/a')}%)",
+            f"- 50-day SMA ${_lvl(ind.get('close_50_sma'))}, 200-day SMA ${_lvl(ind.get('close_200_sma'))}",
+            f"- Bollinger band ${_lvl(ind.get('boll_lb'))} – ${_lvl(ind.get('boll_ub'))} "
+            f"(mid ${_lvl(ind.get('boll'))})",
+        ]
+        if atr:
+            lines.append(
+                f"- ATR(14) ${atr:,.2f} = {atr / ind.close * 100:.1f}% of price; "
+                f"a 2-ATR stop sits near ${ind.close - 2 * atr:,.2f}"
+            )
+        lines.append(f"- Earnings: {self.queued.earnings_note}")
+        return "\n".join(lines)
+
+    def sources(self) -> str:
+        """Section 7 of the deep report: what was read, and when."""
+        rows = ["| Source | Coverage | As of |", "|---|---|---|"]
+        rows += [f"| {name} | {what} | {when} |" for name, what, when in self._source_rows()]
+        if self.missing:
+            rows += ["", f"**Missing this run:** {', '.join(self.missing)}."]
+        return "\n".join(rows)
+
+    def _source_rows(self) -> list[tuple[str, str, str]]:
+        rows: list[tuple[str, str, str]] = []
+        if self.indicators:
+            rows.append(
+                (
+                    "yfinance OHLCV",
+                    f"{self.indicators.sessions} daily bars, {len(self.indicators.indicators)} indicators",
+                    dict(self.source_notes).get("bars", "—"),
+                )
+            )
+        if self.fundamentals:
+            rows.append(("yfinance fundamentals", "valuation, margins, growth, 4 quarters", "latest filing"))
+        if self.positioning:
+            rows.append(("yfinance positioning", "analyst targets, short interest, holders", "vendor snapshot"))
+        rows.append(
+            (
+                "Finnhub company news",
+                f"{len(self.news)} headline(s), 7-day window",
+                self.run_date.isoformat(),
+            )
+        )
+        rows.append(("Screener (this run)", "momentum-burst metrics", self.run_date.isoformat()))
+        rows.append(("Social / retail sentiment", "not collected in this milestone", "—"))
+        return rows
+
+
+class EvidenceBuilder:
+    """Fetches and caches everything the deep stage needs for a set of tickers."""
+
+    def __init__(
+        self,
+        context: DeepContext,
+        finnhub: FinnhubFree,
+        degraded: DegradedTracker,
+        market: MarketData | None = None,
+        fundamentals: FundamentalsClient | None = None,
+    ):
+        self.context = context
+        self.finnhub = finnhub
+        self.degraded = degraded
+        self.market = market or MarketData(degraded=degraded, period=DEEP_HISTORY)
+        self.fundamentals = fundamentals or FundamentalsClient(degraded=degraded)
+        self._bars: dict[str, pd.DataFrame] = {}
+
+    def prefetch(self, symbols: list[str]) -> None:
+        """One bulk OHLCV download for the whole queue."""
+        if not symbols:
+            return
+        self._bars = self.market.load_many(symbols, min_rows=MIN_BARS, period=DEEP_HISTORY)
+        log.info("Deep stage: usable price history for %d/%d queued tickers", len(self._bars), len(symbols))
+
+    def build(self, queued: QueuedTicker) -> Evidence:
+        symbol = queued.symbol
+        evidence = Evidence(
+            queued=queued,
+            run_date=self.context.date,
+            market_context=self.context.market_context,
+            macro_note=self.context.macro_note,
+        )
+
+        frame = self._bars.get(symbol)
+        if frame is None:
+            single = self.market.load_many([symbol], min_rows=MIN_BARS, period=DEEP_HISTORY)
+            frame = single.get(symbol)
+        if frame is None:
+            evidence.missing.append("price history")
+            self.degraded.add(f"Deep {symbol}", "no usable OHLCV history; ticker cannot be analysed")
+            return evidence
+
+        evidence.indicators = compute_indicators(symbol, frame)
+        evidence.source_notes.append(("bars", pd.Timestamp(frame.index[-1]).strftime("%Y-%m-%d close")))
+
+        evidence.fundamentals = self.fundamentals.fundamentals(symbol)
+        if evidence.fundamentals.missing:
+            evidence.missing.append(f"fundamentals fields ({len(evidence.fundamentals.missing)})")
+        evidence.positioning = self.fundamentals.positioning(symbol)
+
+        evidence.news = self.finnhub.company_news(symbol, days=7, limit=8)
+        if not evidence.news:
+            evidence.missing.append("company news")
+        evidence.missing.append("social/retail sentiment (not collected in this milestone)")
+        return evidence
+
+
+def _lvl(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:,.2f}"
+
+
+def _indent(text: str) -> str:
+    return "\n".join(f"  {line}" for line in str(text).splitlines()) or "  none"
+
+
+def _stamp(epoch: int) -> str:
+    if not epoch:
+        return "undated"
+    try:
+        return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d")
+    except (OverflowError, OSError, ValueError):
+        return "undated"
