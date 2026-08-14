@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import date, datetime, timedelta, timezone
 
 from ..data.finnhub_client import FinnhubFree
@@ -34,6 +35,15 @@ MARKET_FEEDS: tuple[tuple[str, str], ...] = (
     ("SeekingAlpha", "https://seekingalpha.com/market_currents.xml"),
     ("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
 )
+
+# Headline tone is a nice-to-have on top of Finnhub's company news. Nothing here
+# is worth making the daily run wait for, so the feeds get a per-request timeout
+# and the set of them gets a total budget; whatever answers in time is used.
+RSS_CONNECT_TIMEOUT = 5.0
+RSS_READ_TIMEOUT = 10.0
+RSS_TOTAL_BUDGET_SECONDS = 30.0
+# Several feed hosts return 403 to a bare urllib/requests agent.
+RSS_USER_AGENT = "daybreak-research/1.0 (+https://github.com/; RSS reader)"
 
 # Headline lexicon. Weights are ordinal, not calibrated — the accuracy tracker
 # is what decides whether the whole source deserves weight, so tuning
@@ -100,11 +110,20 @@ class NewsToneSource(SignalSource):
     scope = "ticker"
     describes = "Finnhub company news + market RSS, headline lexicon tone"
 
-    def __init__(self, finnhub: FinnhubFree, degraded=None, days: int = 7, limit: int = 12):
+    def __init__(self, finnhub: FinnhubFree, degraded=None, days: int = 7, limit: int = 12,
+                 session=None):
         super().__init__(degraded)
         self.finnhub = finnhub
         self.days = days
         self.limit = limit
+        self._session = session
+
+    def session(self):
+        if self._session is None:
+            import requests
+
+            self._session = requests.Session()
+        return self._session
 
     def available(self) -> tuple[bool, str]:
         # RSS still works without a key, so the source is never fully dark.
@@ -191,12 +210,34 @@ class NewsToneSource(SignalSource):
         return out
 
     def _rss_entries(self) -> list[tuple[str, str]]:
+        """Headlines from the market feeds, with a hard ceiling on waiting.
+
+        We fetch the bytes ourselves rather than handing ``feedparser`` a URL.
+        Given a URL it does its own retrieval through ``urllib`` with no
+        timeout, so a feed host that accepts the connection and then never
+        answers hangs the entire daily run — observed live against one of these
+        three feeds, which sat in ESTABLISHED with zero bytes for nine minutes
+        before the run was killed. A source that dies must degrade visibly; one
+        that hangs is worse than one that fails, because in Cloud Run Jobs it
+        burns the whole job timeout and produces nothing at all.
+        """
         import feedparser
 
         out: list[tuple[str, str]] = []
+        deadline = time.monotonic() + RSS_TOTAL_BUDGET_SECONDS
         for label, url in MARKET_FEEDS:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                log.info("RSS budget of %.0fs spent; skipping %s", RSS_TOTAL_BUDGET_SECONDS, label)
+                continue
             try:
-                parsed = feedparser.parse(url)
+                response = self.session().get(
+                    url,
+                    timeout=(RSS_CONNECT_TIMEOUT, min(RSS_READ_TIMEOUT, remaining)),
+                    headers={"User-Agent": RSS_USER_AGENT},
+                )
+                response.raise_for_status()
+                parsed = feedparser.parse(response.content)
             except Exception as exc:  # noqa: BLE001 - one dead feed is not a failure
                 log.info("RSS feed %s unavailable: %s", label, exc)
                 continue

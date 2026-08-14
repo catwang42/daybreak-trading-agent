@@ -99,6 +99,67 @@ def test_synonym_stuffing_does_not_beat_a_clear_single_signal():
     assert stuffed <= clean
 
 
+class FakeFinnhub:
+    enabled = False
+
+    def company_news(self, symbol, days, limit):
+        return []
+
+
+class RecordingSession:
+    """A requests-shaped session that records how it was called."""
+
+    def __init__(self, behaviour):
+        self.behaviour = behaviour
+        self.calls = []
+
+    def get(self, url, timeout=None, headers=None):
+        self.calls.append({"url": url, "timeout": timeout, "headers": headers})
+        return self.behaviour(url)
+
+
+class FakeResponse:
+    def __init__(self, content=b"<rss><channel></channel></rss>"):
+        self.content = content
+
+    def raise_for_status(self):
+        return None
+
+
+def test_every_rss_fetch_carries_a_timeout():
+    """A feed host that accepts the connection and never answers hung a live
+    run for nine minutes. feedparser given a URL fetches with no timeout at
+    all, so the bytes are fetched here instead."""
+    session = RecordingSession(lambda url: FakeResponse())
+    source = N.NewsToneSource(finnhub=FakeFinnhub(), session=session)
+    source._rss_entries()
+
+    assert len(session.calls) == len(N.MARKET_FEEDS)
+    for call in session.calls:
+        connect, read = call["timeout"]
+        assert connect > 0 and read > 0
+
+
+def test_one_dead_feed_does_not_take_the_others_down():
+    def behaviour(url):
+        if "seekingalpha" in url:
+            raise TimeoutError("read timed out")
+        return FakeResponse()
+
+    session = RecordingSession(behaviour)
+    source = N.NewsToneSource(finnhub=FakeFinnhub(), session=session)
+    assert source._rss_entries() == []
+    assert len(session.calls) == len(N.MARKET_FEEDS), "the run continued past the dead feed"
+
+
+def test_the_market_leg_never_raises_out_of_collect():
+    def behaviour(url):
+        raise ConnectionError("dns is having a day")
+
+    source = N.NewsToneSource(finnhub=FakeFinnhub(), session=RecordingSession(behaviour))
+    assert source.fetch(["TST"], RUN).signals == []
+
+
 # --- insiders -----------------------------------------------------------
 
 FORM4 = """<?xml version="1.0"?>
