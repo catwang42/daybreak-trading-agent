@@ -253,6 +253,64 @@ def test_preferred_sector_sorts_ahead_of_a_higher_score():
     assert ranked[0].symbol == "AAA" and ranked[0].preferred_sector
 
 
+def test_sector_cap_keeps_the_best_three_and_lets_other_sectors_through():
+    def c(symbol, sector, score):
+        return S.Candidate(
+            symbol=symbol, name=symbol, sector=sector, industry="x", price=10.0, score=score,
+            rating="A", state="ACTIONABLE_DAY1", primary_trigger="4pct_breakout",
+        )
+
+    pool = [c(f"F{i}", "Financials", 90 - i) for i in range(5)] + [c("E1", "Energy", 60)]
+    capped = S.cap_per_sector(pool, max_per_sector=3)
+    assert [x.symbol for x in capped] == ["F0", "F1", "F2", "E1"]
+    assert S.cap_per_sector(pool, max_per_sector=0) == pool
+
+
+def test_deep_queue_round_robins_across_sectors_before_repeating_one():
+    from tradingagent.discovery.shortlist import QuickTake, ShortlistEntry, deep_dive_queue
+
+    def entry(symbol, sector, priority):
+        candidate = S.Candidate(
+            symbol=symbol, name=symbol, sector=sector, industry="x", price=10.0, score=80,
+            rating="A", state="ACTIONABLE_DAY1", primary_trigger="4pct_breakout",
+        )
+        take = QuickTake(rating="Hold", confidence="M", thesis="t", key_risk="r",
+                         deep_dive_priority=priority)
+        return ShortlistEntry(candidate=candidate, take=take, earnings_flag="—", news_headline=None)
+
+    # Financials sweeps the priority ranking; Energy leads on sector momentum.
+    entries = [
+        entry("F1", "Financials", 9), entry("F2", "Financials", 8),
+        entry("F3", "Financials", 7), entry("E1", "Energy", 6), entry("T1", "Information Technology", 5),
+    ]
+    sector_map = SEC.SectorMap(rows=[
+        SEC.SectorRow("Energy", "XLE", 0.8, 20, ret_5d=5.0),
+        SEC.SectorRow("Financials", "XLF", 0.9, 70, ret_5d=1.0),
+        SEC.SectorRow("Information Technology", "XLK", 0.6, 60, ret_5d=0.5),
+    ])
+    assert [e.symbol for e in deep_dive_queue(entries, sector_map, cap=3)] == ["E1", "F1", "T1"]
+    # Beyond one name per sector it falls back to depth, still leader-first.
+    assert [e.symbol for e in deep_dive_queue(entries, sector_map, cap=5)] == [
+        "E1", "F1", "T1", "F2", "F3",
+    ]
+
+
+def test_deep_queue_skips_degraded_entries_and_survives_a_missing_sector_map():
+    from tradingagent.discovery.shortlist import QuickTake, ShortlistEntry, deep_dive_queue
+
+    def entry(symbol, sector, take):
+        candidate = S.Candidate(
+            symbol=symbol, name=symbol, sector=sector, industry="x", price=10.0, score=80,
+            rating="A", state="ACTIONABLE_DAY1", primary_trigger="4pct_breakout",
+        )
+        return ShortlistEntry(candidate=candidate, take=take, earnings_flag="—", news_headline=None)
+
+    good = QuickTake(rating="Buy", confidence="H", thesis="t", key_risk="r", deep_dive_priority=9)
+    entries = [entry("BAD", "Energy", None), entry("OK", "Financials", good)]
+    assert [e.symbol for e in deep_dive_queue(entries, None, cap=3)] == ["OK"]
+    assert deep_dive_queue([entry("BAD", "Energy", None)], None) == []
+
+
 def test_up_streak_and_breakdown_detection():
     rising = pd.Series([100, 101, 102, 103, 104, 110.0])
     assert S.up_streak_before_trigger(rising) >= 3

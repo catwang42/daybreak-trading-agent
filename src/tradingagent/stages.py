@@ -21,7 +21,14 @@ from .data.universe import Constituent, load_universe, normalize_sector
 from .data.validate import DegradedTracker
 from .discovery.breadth import BreadthResult, analyze_breadth
 from .discovery.calendar import CalendarView, build_calendar
-from .discovery.screener import Candidate, market_gate_from_breadth, paid_gaps, screen_universe
+from .discovery.screener import (
+    MAX_PER_SECTOR,
+    Candidate,
+    cap_per_sector,
+    market_gate_from_breadth,
+    paid_gaps,
+    screen_universe,
+)
 from .discovery.sectors import SectorMap, build_sector_map
 from .discovery.shortlist import ShortlistEntry, build_shortlist, market_commentary
 from .journal import append_entries, entries_from_shortlist
@@ -118,6 +125,15 @@ def run_discovery(
 
     # --- LLM (FAST tier only in M1) ---------------------------------------
     size = shortlist_size or prefs.shortlist_max
+    # Cap sector concentration before spending tokens: a hot sector triggers most
+    # of its members at once and would otherwise fill the whole shortlist.
+    eligible = cap_per_sector(candidates, MAX_PER_SECTOR)
+    log.info(
+        "Shortlist pool after the %d-per-sector cap: %d of %d candidates",
+        MAX_PER_SECTOR,
+        len(eligible),
+        len(candidates),
+    )
     shortlist: list[ShortlistEntry] = []
     commentary = "_LLM disabled for this run (--skip-llm)._"
     if skip_llm:
@@ -125,12 +141,12 @@ def run_discovery(
         shortlist = [
             ShortlistEntry(candidate=c, take=None, earnings_flag="—", news_headline=None,
                            degraded_reason="LLM disabled")
-            for c in candidates[:size]
+            for c in eligible[:size]
         ]
     else:
         gateway = LLMGateway(settings, ledger)
         shortlist = build_shortlist(
-            candidates, breadth, sector_map, calendar_view, finnhub, gateway, run_date, degraded, size=size
+            eligible, breadth, sector_map, calendar_view, finnhub, gateway, run_date, degraded, size=size
         )
         commentary = market_commentary(
             gateway,
@@ -201,6 +217,8 @@ def run_discovery(
         paid_gaps=paid_gaps(),
         runtime_seconds=time.monotonic() - started,
         stage="discovery",
+        max_per_sector=MAX_PER_SECTOR,
+        deep_cap=settings.deep_ticker_cap,
     )
     markdown = render_daily_brief(context)
     path = write_report(settings.report_dir() / "daily-brief.md", markdown, settings.reports_bucket)

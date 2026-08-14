@@ -172,6 +172,47 @@ def build_shortlist(
     return entries
 
 
+def deep_dive_queue(
+    entries: list[ShortlistEntry],
+    sector_map: SectorMap | None = None,
+    cap: int = 5,
+) -> list[ShortlistEntry]:
+    """Order the deep-analysis queue so it spans sectors instead of stacking one.
+
+    Round-robin: the best name from each represented sector first (sectors taken
+    in momentum order, leaders first), then second names, and so on. Within a
+    sector the incoming order — priority, then rating, then screener score — is
+    preserved. Entries with no quick take are never queued for a deep dive.
+    """
+    ranked = [e for e in entries if e.take is not None]
+    if not ranked:
+        return []
+
+    by_sector: dict[str, list[ShortlistEntry]] = {}
+    for entry in ranked:
+        by_sector.setdefault(entry.candidate.sector, []).append(entry)
+
+    momentum_rank = {row.sector: i for i, row in enumerate(sector_map.rows)} if sector_map else {}
+    first_seen = {sector: ranked.index(group[0]) for sector, group in by_sector.items()}
+    sectors = sorted(
+        by_sector,
+        # Sectors absent from the map sort last but keep their shortlist order.
+        key=lambda s: (momentum_rank.get(s, len(momentum_rank)), first_seen[s]),
+    )
+
+    out: list[ShortlistEntry] = []
+    depth = 0
+    while len(out) < cap and depth < max(len(g) for g in by_sector.values()):
+        for sector in sectors:
+            group = by_sector[sector]
+            if depth < len(group):
+                out.append(group[depth])
+                if len(out) == cap:
+                    return out
+        depth += 1
+    return out
+
+
 def _trend_note(candidate: Candidate) -> str:
     if candidate.above_50dma and candidate.above_200dma:
         return "above both the 50-day and 200-day moving averages"
