@@ -100,6 +100,21 @@ def test_rising_broad_market_scores_healthy():
 # --- sectors ------------------------------------------------------------
 
 
+def test_percentile_component_states_its_own_sample_window():
+    ma8 = pd.Series(np.linspace(0.3, 0.8, 400))
+    component = B.component_percentile(ma8)
+    assert "400 sessions" in component.signal
+    assert "~1.6y" in component.signal
+    assert "less than one full cycle" in component.signal
+
+
+def test_breadth_history_note_scales_with_available_history():
+    long_run = B.BreadthResult(75.0, "Healthy", "75-90%", "", history_sessions=500)
+    assert "500 sessions" in long_run.history_note and "~2.0y" in long_run.history_note
+    thin = B.BreadthResult(50.0, "Neutral", "60-75%", "", history_sessions=10)
+    assert "too short" in thin.history_note
+
+
 def test_bucket_classification_covers_all_gics_sectors():
     sectors = {c.sector for c in load_snapshot()}
     assert sectors, "snapshot must not be empty"

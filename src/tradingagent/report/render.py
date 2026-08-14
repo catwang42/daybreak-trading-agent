@@ -88,7 +88,7 @@ def _section_market_overview(ctx: ReportContext) -> str:
     for c in b.components:
         score = f"{c.score:.0f}" if c.available else "—"
         lines.append(f"| {_component_label(c.key)} | {score} | {c.signal} |")
-    lines.append("")
+    lines += ["", f"> {b.history_note}", ""]
     return "\n".join(lines)
 
 
