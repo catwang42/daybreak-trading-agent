@@ -6,6 +6,9 @@ arrive already in percentage points. Rendering them all the same way is a
 silent data error — the analyst reads the table and believes it.
 """
 
+import pytest
+
+from tradingagent.data import fundamentals as F
 from tradingagent.data.fundamentals import Fundamentals, Positioning
 
 
@@ -61,3 +64,65 @@ def test_positioning_omits_the_gap_when_either_side_is_missing():
     assert "versus that mean target" not in Positioning(
         symbol="CRM", target_mean=250.0
     ).markdown(price=None)
+
+
+# --- plausibility ranges (Gate 2 pre-work) --------------------------------
+
+
+def test_every_plausible_range_is_ordered_and_names_a_real_field():
+    """A typo in the key would silently disable the check for that field."""
+    owners = set(dict(F.Fundamentals.ROWS).values()) | set(dict(F.Positioning.ROWS).values())
+    for name, (low, high) in F.PLAUSIBLE.items():
+        assert low < high, f"{name}: range is inverted"
+        assert name in owners, f"{name}: no rendered row reads this range"
+    for _, name in F.Fundamentals.ROWS + F.Positioning.ROWS:
+        assert name in F.PLAUSIBLE, f"{name}: rendered but never range-checked"
+
+
+@pytest.mark.parametrize(
+    "field_name, ok, bad",
+    [
+        ("dividend_yield", 0.91, 91.0),      # the yfinance units switch
+        ("profit_margin", 0.18, 1.8),        # a ratio mistaken for percentage points
+        ("revenue_growth", -0.12, -4.0),     # revenue cannot fall 400%
+        ("debt_to_equity", 124.28, 250_000.0),  # 2500x equity is a vendor artefact
+        ("beta", 1.14, 42.0),
+        ("market_cap", 2.4e11, 500.0),
+    ],
+)
+def test_is_suspect_catches_the_unit_slips_it_was_built_for(field_name, ok, bad):
+    assert F.is_suspect(field_name, ok) is False
+    assert F.is_suspect(field_name, bad) is True
+    assert F.is_suspect(field_name, None) is False
+
+
+def test_suspect_values_are_marked_in_the_pack_rather_than_passed_through():
+    snapshot = F.Fundamentals(
+        symbol="TST", market_cap=2.4e11, trailing_pe=31.2, dividend_yield=91.0, profit_margin=0.18
+    )
+    assert snapshot.suspect_fields() == ["Dividend yield"]
+
+    text = snapshot.markdown()
+    assert "91.00%" in text                     # the number is still shown, not hidden
+    assert F.SUSPECT_MARK.strip() in text       # but flagged where the analyst reads it
+    assert "**SUSPECT** (Dividend yield)" in text
+    assert "Treat them as unavailable" in text
+    # A plausible neighbour on the same row set is left alone.
+    assert f"31.20{F.SUSPECT_MARK}" not in text
+
+
+def test_a_clean_snapshot_carries_no_suspect_marks():
+    snapshot = F.Fundamentals(
+        symbol="TST", market_cap=2.4e11, trailing_pe=31.2, profit_margin=0.18,
+        debt_to_equity=124.28, dividend_yield=0.91, beta=1.14,
+    )
+    assert snapshot.suspect_fields() == []
+    assert "SUSPECT" not in snapshot.markdown()
+
+
+def test_positioning_flags_an_impossible_short_interest():
+    pos = F.Positioning(symbol="TST", short_percent_of_float=4.2, held_by_insiders=0.03)
+    assert pos.suspect_fields() == ["Short interest (% of float)"]
+    text = pos.markdown(price=100.0)
+    assert F.SUSPECT_MARK.strip() in text
+    assert "**SUSPECT** (Short interest (% of float))" in text

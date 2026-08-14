@@ -93,6 +93,14 @@ def evidence_quality_note(evidence: Evidence, analysts: list[AnalystResult]) -> 
         lines.append("- All four analysts reported.")
     if evidence.missing:
         lines.append(f"- Missing or partial data: {'; '.join(evidence.missing)}.")
+    suspect = (evidence.fundamentals.suspect_fields() if evidence.fundamentals else []) + (
+        evidence.positioning.suspect_fields() if evidence.positioning else []
+    )
+    if suspect:
+        lines.append(
+            f"- Marked SUSPECT (outside the plausible range for the field, treat as "
+            f"unavailable): {', '.join(suspect)}."
+        )
     lines.append(
         "- No social-media sentiment and no options-market data were available in this run."
     )

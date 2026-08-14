@@ -84,7 +84,12 @@ class Evidence:
         gaps = []
         if self.indicators is None:
             gaps.append("price history")
-        if self.fundamentals is None or len(self.fundamentals.missing) >= 4:
+        if (
+            self.fundamentals is None
+            or len(self.fundamentals.missing) >= 4
+            or len(self.fundamentals.suspect_fields()) >= 3
+        ):
+            # A SUSPECT field is worse than an absent one: it can be believed.
             gaps.append("company fundamentals")
         if self.positioning is None:
             gaps.append("positioning data")
