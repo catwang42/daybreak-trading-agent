@@ -312,7 +312,12 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 _CHARS_PER_TOKEN = 3.0  # conservative: JSON escaping and prose both run short of 4
 _UNCAPPED_STR_CHARS = 400
 _LIST_ITEM_CHARS = 250
-_BUDGET_HEADROOM = 1.25
+# Headroom exists because the caps are advisory to the model and binding to us:
+# it overruns a stated character limit routinely (the research manager did so
+# twice in three tickers at 1.25), and an overrun that lands inside the budget
+# costs one `string_too_long` re-prompt with a usable error, while an overrun
+# that hits the ceiling costs a truncated reply and a `json_invalid` guess.
+_BUDGET_HEADROOM = 1.6
 _BUDGET_FLOOR = 600
 
 
