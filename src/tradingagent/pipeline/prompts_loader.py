@@ -25,9 +25,10 @@ def load_prompt(name: str) -> str:
     return path.read_text()
 
 
-def render(name: str, **values: object) -> str:
-    template = load_prompt(name)
+def render(prompt_name: str, /, **values: object) -> str:
+    """Render a template. Positional-only so ``name=`` can be a placeholder."""
+    template = load_prompt(prompt_name)
     try:
         return template.format(**values)
     except KeyError as exc:
-        raise PromptError(f"prompt '{name}' needs placeholder {exc}") from exc
+        raise PromptError(f"prompt '{prompt_name}' needs placeholder {exc}") from exc
