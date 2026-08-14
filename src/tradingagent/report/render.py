@@ -1,0 +1,310 @@
+"""Render ``reports/<date>/daily-brief.md`` in the exact order of
+``config/report-schema.md``.
+
+Section order is fixed and load-bearing: 1 Market Overview, 2 Macro & Events,
+3 Sector Opportunity Map, 4 Shortlist, 5 Deep Analysis (M2+), 6 Options (M4+),
+7 Degraded Sources, 8 Disclaimer footer (verbatim).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
+
+from ..data.market import Quote
+from ..data.validate import DegradedTracker
+from ..discovery.breadth import BreadthResult
+from ..discovery.calendar import CalendarView
+from ..discovery.screener import Candidate
+from ..discovery.sectors import SectorMap
+from ..discovery.shortlist import ShortlistEntry
+from ..llm import TokenLedger
+
+DISCLAIMER = (
+    "Automated research output for personal study. Not financial advice. "
+    "Paper trading only. Verify all data before acting."
+)
+
+
+@dataclass
+class ReportContext:
+    run_date: date
+    commentary: str
+    indices: list[Quote]
+    vix: float | None
+    breadth: BreadthResult
+    sector_map: SectorMap
+    calendar: CalendarView
+    shortlist: list[ShortlistEntry]
+    degraded: DegradedTracker
+    ledger: TokenLedger
+    universe_size: int
+    screened: int
+    candidates: list[Candidate]
+    session_note: str
+    data_as_of: str
+    paid_gaps: list[str] = field(default_factory=list)
+    runtime_seconds: float = 0.0
+    stage: str = "discovery"
+
+
+def _pct(value: float | None, digits: int = 2) -> str:
+    return f"{value:+.{digits}f}%" if value is not None else "n/a"
+
+
+def _num(value: float | None, digits: int = 2) -> str:
+    return f"{value:,.{digits}f}" if value is not None else "n/a"
+
+
+def _section_market_overview(ctx: ReportContext) -> str:
+    lines = ["## 1. Market Overview", "", ctx.commentary, ""]
+    lines += [
+        "| Index (ETF proxy) | Last | 1d | 5d | 1mo | 3mo |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    for q in ctx.indices:
+        lines.append(
+            f"| {q.label} ({q.symbol}) | {_num(q.price)} | {_pct(q.ret('1d'))} | "
+            f"{_pct(q.ret('5d'))} | {_pct(q.ret('1mo'))} | {_pct(q.ret('3mo'))} |"
+        )
+    if not ctx.indices:
+        lines.append("| _no index data_ | | | | | |")
+
+    b = ctx.breadth
+    lines += [
+        "",
+        f"**VIX** {_num(ctx.vix)} · **Breadth composite** {b.composite}/100 "
+        f"({b.zone}) · **Suggested equity exposure** {b.exposure}",
+        "",
+        f"{_num(b.breadth_pct_above_50dma, 1)}% of the {b.universe_size}-name universe is above its "
+        f"50-day MA; {_num(b.breadth_pct_above_200dma, 1)}% above its 200-day MA. "
+        f"Data quality: {b.data_quality}.",
+        "",
+        "| Breadth component | Score | Signal |",
+        "|---|---:|---|",
+    ]
+    for c in b.components:
+        score = f"{c.score:.0f}" if c.available else "—"
+        lines.append(f"| {_component_label(c.key)} | {score} | {c.signal} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _component_label(key: str) -> str:
+    from ..discovery.breadth import COMPONENT_LABELS
+
+    return COMPONENT_LABELS.get(key, key)
+
+
+def _section_macro(ctx: ReportContext) -> str:
+    lines = ["## 2. Macro & Events Today", ""]
+    cal = ctx.calendar
+    if not cal.macro_is_live:
+        lines.append(
+            "> Economic calendar source is an **indicative static release schedule**, not a live "
+            "feed (no free live source available — see Degraded Sources). Confirm exact dates and "
+            "times before acting."
+        )
+        lines.append("")
+
+    todays = [e for e in cal.macro if e.date == ctx.run_date]
+    lines.append(
+        "**Today:** "
+        + (", ".join(f"{e.name} ({e.impact})" for e in todays) if todays else "no scheduled US macro release.")
+    )
+    lines.append("")
+    upcoming = [e for e in cal.macro if e.date > ctx.run_date][:8]
+    if upcoming:
+        lines += ["| Date | Event | Impact | Source |", "|---|---|---|---|"]
+        lines += [f"| {e.date} | {e.name} | {e.impact} | {e.source} |" for e in upcoming]
+        lines.append("")
+
+    if cal.earnings_today:
+        names = ", ".join(f"{e.symbol} ({e.timing})" for e in cal.earnings_today[:20])
+        lines.append(f"**Earnings today (universe):** {names}")
+    else:
+        lines.append("**Earnings today (universe):** none.")
+    lines.append("")
+
+    week = [e for e in cal.earnings_week if e.date > ctx.run_date][:15]
+    if week:
+        lines += ["| Date | Ticker | Timing | EPS est. |", "|---|---|---|---:|"]
+        lines += [
+            f"| {e.date} | {e.symbol} | {e.timing} | {_num(e.eps_estimate)} |" for e in week
+        ]
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _section_sectors(ctx: ReportContext) -> str:
+    s = ctx.sector_map
+    lines = [
+        "## 3. Sector Opportunity Map",
+        "",
+        f"**Risk regime:** {s.risk_regime} (cyclical−defensive momentum spread {s.risk_score:+.2f}) · "
+        f"**Estimated cycle phase:** {s.cycle_phase} (confidence {s.cycle_confidence})",
+        "",
+        "| Sector | ETF | Bucket | % above 50DMA | 1d | 5d | 1mo | 3mo | Status |",
+        "|---|---|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in s.rows:
+        star = " ⭑" if row.preferred else ""
+        lines.append(
+            f"| {row.sector}{star} | {row.etf or '—'} | {row.bucket} | {row.uptrend_ratio:.0%} | "
+            f"{_pct(row.ret_1d)} | {_pct(row.ret_5d)} | {_pct(row.ret_1mo)} | {_pct(row.ret_3mo)} | "
+            f"{row.status} |"
+        )
+    if not s.rows:
+        lines.append("| _no sector data_ | | | | | | | | |")
+
+    lines += [
+        "",
+        "⭑ = a target sector from `config/preferences.md`.",
+        "",
+        f"**Leading:** {', '.join(r.sector for r in s.leaders()) or 'n/a'} · "
+        f"**Lagging:** {', '.join(r.sector for r in s.laggards()) or 'n/a'}",
+        "",
+        f"**Overbought:** {', '.join(s.overbought) or 'none'} · "
+        f"**Oversold:** {', '.join(s.oversold) or 'none'}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _section_shortlist(ctx: ReportContext) -> str:
+    lines = [
+        "## 4. Shortlist",
+        "",
+        f"Screened {ctx.screened} of {ctx.universe_size} universe names; "
+        f"{len(ctx.candidates)} passed the momentum-burst filter; top {len(ctx.shortlist)} shown.",
+        "",
+        "| Ticker | Sector | Why it surfaced | Signals (M3+) | Quick rating | Priority | Earnings |",
+        "|---|---|---|---|---|---:|---|",
+    ]
+    for e in ctx.shortlist:
+        c = e.candidate
+        lines.append(
+            f"| **{c.symbol}** | {c.sector} | {c.why} | _pending M3_ | {e.rating_label} | "
+            f"{e.priority or '—'} | {e.earnings_flag} |"
+        )
+    if not ctx.shortlist:
+        lines.append("| _no candidates passed today's filters_ | | | | | | |")
+    lines.append("")
+
+    for e in ctx.shortlist:
+        c = e.candidate
+        lines.append(f"### {c.symbol} — {c.name}")
+        lines.append(
+            f"Screener {c.score}/100 ({c.rating}, {c.state}) · last ${c.price:,.2f} "
+            f"({c.day_gain_pct:+.2f}%) · volume {c.volume_ratio_20d:.2f}× 20d avg · "
+            f"entry ref ${c.entry_ref:,.2f} / stop ref ${c.stop_ref:,.2f} (risk {c.risk_pct:.1f}%)"
+        )
+        lines.append("")
+        if e.take is None:
+            lines.append(
+                f"> **DEGRADED** — quick take unavailable: {e.degraded_reason or 'LLM call failed'}"
+            )
+        else:
+            lines.append(f"- **Rating:** {e.take.rating} (confidence {e.take.confidence})")
+            lines.append(f"- **Thesis:** {e.take.thesis}")
+            lines.append(f"- **Key risk:** {e.take.key_risk}")
+            lines.append(f"- **Deep-dive priority:** {e.take.deep_dive_priority}/10")
+        if e.news_headline:
+            lines.append(f"- **Latest headline:** {e.news_headline}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _section_deep(ctx: ReportContext) -> str:
+    ranked = [e for e in ctx.shortlist if e.take][:5]
+    queue = ", ".join(f"{e.symbol} ({e.priority}/10)" for e in ranked) or "none"
+    return (
+        "## 5. Deep Analysis\n\n"
+        "_Not yet implemented — Milestone 2 ports the TradingAgents pipeline and writes "
+        "`deep/<ticker>.md` per ticker._\n\n"
+        f"Deep-analysis queue by priority: {queue}\n"
+    )
+
+
+def _section_options(ctx: ReportContext) -> str:
+    return (
+        "## 6. Options Candidates\n\n"
+        "_Not yet implemented — Milestone 4 adds cash-secured put and covered-call "
+        "candidates from Alpaca paper option chains._\n"
+    )
+
+
+def _section_degraded(ctx: ReportContext) -> str:
+    lines = ["## 7. Degraded Sources", ""]
+    if ctx.degraded.entries:
+        lines.append(f"**DEGRADED — missing: {', '.join(ctx.degraded.sources)}**")
+        lines.append("")
+        lines += ["| Source | Detail |", "|---|---|"]
+        lines += [f"| {source} | {reason} |" for source, reason in ctx.degraded.entries]
+    else:
+        lines.append("none")
+    lines.append("")
+
+    if ctx.paid_gaps:
+        lines += [
+            "### Paid-data bottlenecks (not purchased — your call)",
+            "",
+        ]
+        lines += [f"- {gap}" for gap in ctx.paid_gaps]
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _footer(ctx: ReportContext) -> str:
+    ledger = ctx.ledger
+    lines = [
+        "---",
+        "",
+        "### Run footer",
+        "",
+        f"- **Stage:** {ctx.stage} · **Runtime:** {ctx.runtime_seconds:.1f}s · "
+        f"**Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        f"- **Market data as of:** {ctx.data_as_of} · **Session:** {ctx.session_note}",
+        "",
+        "| LLM tier | Model | Calls | Prompt tok | Completion tok | Total tok | Est. cost |",
+        "|---|---|---:|---:|---:|---:|---:|",
+    ]
+    for tier in ("fast", "smart", "deep"):
+        usage = ledger.by_tier.get(tier)
+        if not usage:
+            continue
+        lines.append(
+            f"| {tier} | `{ledger.by_model.get(tier, '—')}` | {usage.calls} | "
+            f"{usage.prompt_tokens:,} | {usage.completion_tokens:,} | {usage.total_tokens:,} | "
+            f"${usage.cost_usd:.4f} |"
+        )
+    if not ledger.by_tier:
+        lines.append("| _no LLM calls this run_ | | | | | | |")
+    lines += [
+        f"| **total** | | **{ledger.total_calls}** | | | **{ledger.total_tokens:,}** | "
+        f"**${ledger.total_cost_usd:.4f}** |",
+        "",
+        f"_{DISCLAIMER}_",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def render_daily_brief(ctx: ReportContext) -> str:
+    header = (
+        f"# Daily Trading Research Brief — {ctx.run_date.isoformat()}\n\n"
+        f"> Research only. Paper trading. The human makes every decision.\n"
+    )
+    return "\n".join(
+        [
+            header,
+            _section_market_overview(ctx),
+            _section_macro(ctx),
+            _section_sectors(ctx),
+            _section_shortlist(ctx),
+            _section_deep(ctx),
+            _section_options(ctx),
+            _section_degraded(ctx),
+            _footer(ctx),
+        ]
+    )

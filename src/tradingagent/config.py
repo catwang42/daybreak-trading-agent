@@ -33,7 +33,9 @@ def _clean(value: str | None) -> str:
     """
     if value is None:
         return ""
-    return re.sub(r"\s+#.*$", "", value).strip()
+    # `^#` matters too: dotenv strips leading whitespace, so a documented-but-
+    # empty `KEY=   # comment` arrives here as a bare comment string.
+    return re.sub(r"(?:^|\s+)#.*$", "", value).strip()
 
 
 def env(key: str, default: str = "") -> str:
