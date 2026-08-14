@@ -32,6 +32,12 @@ Last close: ${price:.2f} ({day_gain_pct:+.2f}% on the day)
 - Earnings: {earnings_note}
 - Recent headlines: {news_note}
 
+## Signal layer
+Independent sources read outside the price screen — company news tone, insider
+Form 4 filings, the macro backdrop and prediction-market odds. Each carries a
+direction and a strength, and the ranking has already been adjusted by them.
+{signal_note}
+
 ## Your task
 Judge whether this candidate deserves a slot in today's deep-analysis queue.
 Weigh the technical setup against the market regime and the earnings calendar.
@@ -58,6 +64,10 @@ Rules:
   - **M** — anything in between.
   Apply the count as given. Deviate only to move one step, and only if you name
   the specific reason in the thesis.
+- The signal layer is evidence, not a verdict. A source that contradicts the
+  setup is a reason to name that tension in the thesis or the key risk; a source
+  that agrees is not a reason to upgrade past the pool placement. A source that
+  did not report says nothing — do not read silence as neutral.
 - `thesis` is at most 2 sentences citing the specific numbers above, including
   where the name sits in today's pool.
 - `key_risk` is one sentence naming the most likely way this setup fails.

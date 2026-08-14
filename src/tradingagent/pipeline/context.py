@@ -23,7 +23,11 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 CONTEXT_FILENAME = "discovery-context.json"
-SCHEMA_VERSION = 1
+# v2 (M3) adds the signal layer. Bumped rather than defaulted silently: a v1
+# context would parse cleanly and hand the deep stage an empty signal block,
+# which reads as "no source fired today" when the truth is "this file predates
+# the sources". Forcing a discovery re-run is the honest failure.
+SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -43,6 +47,15 @@ class QueuedTicker:
     sector_note: str = "sector data unavailable"
     news_headline: str | None = None
     screener: dict[str, Any] = field(default_factory=dict)
+    #: Rendered per-ticker signal layer (M3), already markdown. Carried as text
+    #: rather than as objects because this file is the stage boundary and a
+    #: standalone `--stage deep` must not need the source clients to re-run.
+    signal_block: str = ""
+    #: source name -> -1/0/+1 as read at decision time. The journal records this
+    #: so `signals.accuracy` can grade each source against the realised move.
+    signal_readings: dict[str, int] = field(default_factory=dict)
+    #: Points the signal layer added to this name's screener score.
+    signal_adjustment: float = 0.0
 
     def screener_markdown(self) -> str:
         if not self.screener:

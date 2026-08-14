@@ -129,8 +129,23 @@ class Evidence:
             "",
             f"- Earnings: {self.queued.earnings_note}",
             f"- Macro releases in the window:\n{_indent(self.macro_note)}",
+            "",
+            self.signal_block(),
         ]
         return "\n".join(parts)
+
+    def signal_block(self) -> str:
+        """The M3 per-ticker signal layer, as handed to the analysts.
+
+        Only the ticker-level half: the market-wide backdrop is already in
+        ``market_context``, which every role is shown, so repeating it here
+        would pay for the same tokens twice and invite a role to read a
+        market-wide reading as something specific to this name.
+        """
+        return self.queued.signal_block or (
+            "### Signal layer\n\n- No signal source ran for this ticker "
+            "(see the market context for the run-wide backdrop)."
+        )
 
     def sentiment_block(self) -> str:
         parts = ["### Sell-side posture and float positioning", ""]
@@ -152,10 +167,14 @@ class Evidence:
             f"- Close location in the day's range: {self.queued.screener.get('close_location_pct', 'unavailable')}%",
             f"- Headlines retrieved in the last 7 days: {len(self.news)}",
             "",
+            self.signal_block(),
+            "",
             "### Coverage limit",
             "",
-            "- No social-media or retail-forum data is available in this run. "
-            "Treat positioning proxies as the whole of your evidence.",
+            "- Still no social-media or retail-forum data: the Reddit API now requires manual "
+            "approval and ours is pending. Insider filings are what corporate officers did with "
+            "their own money and headline tone is what the press said — neither is a proxy for "
+            "retail positioning, so do not treat them as one.",
         ]
         return "\n".join(parts)
 
@@ -212,7 +231,17 @@ class Evidence:
             )
         )
         rows.append(("Screener (this run)", "momentum-burst metrics", self.run_date.isoformat()))
-        rows.append(("Social / retail sentiment", "not collected in this milestone", "—"))
+        for source in sorted(self.queued.signal_readings):
+            rows.append(
+                (
+                    f"Signal: {source}",
+                    f"direction {self.queued.signal_readings[source]:+d} at decision time",
+                    self.run_date.isoformat(),
+                )
+            )
+        rows.append(
+            ("Social / retail sentiment", "not collected — Reddit API approval pending", "—")
+        )
         return rows
 
 

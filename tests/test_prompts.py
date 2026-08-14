@@ -38,4 +38,5 @@ def _quick_take_fields():
         earnings_note="none in 10 days", news_note="none retrieved",
         pool_note="32 candidates passed today's screen.", checklist="- [x] volume",
         confirmed=5, total_confirmations=6,
+        signal_note="### Signal layer for TST\n\n- No ticker-level signals fired.",
     )

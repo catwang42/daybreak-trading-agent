@@ -18,6 +18,7 @@ from ..data.finnhub_client import FinnhubFree
 from ..data.validate import DegradedTracker
 from ..llm import LLMError, LLMGateway
 from ..pipeline.prompts_loader import render
+from ..signals import SignalBundle, SignalHub
 from .breadth import BreadthResult
 from .calendar import CalendarView, earnings_within
 from .screener import Candidate
@@ -46,6 +47,12 @@ class ShortlistEntry:
     earnings_flag: str
     news_headline: str | None
     degraded_reason: str | None = None
+    #: What the M3 signal layer read for this name, if it ran.
+    signals: SignalBundle | None = None
+    #: 1-based place in the pool on screener score alone, before any signal
+    #: moved it. Kept so the report can show what the signals actually changed
+    #: rather than asserting that they did something.
+    screen_rank: int = 0
 
     @property
     def symbol(self) -> str:
@@ -60,6 +67,17 @@ class ShortlistEntry:
     @property
     def priority(self) -> int:
         return self.take.deep_dive_priority if self.take else 0
+
+    @property
+    def score_adjustment(self) -> float:
+        return self.signals.score_adjustment() if self.signals else 0.0
+
+    @property
+    def adjusted_score(self) -> float:
+        return self.candidate.score + self.score_adjustment
+
+    def signal_note(self) -> str:
+        return self.signals.summary() if self.signals else "no signal layer this run"
 
 
 @dataclass
@@ -167,6 +185,7 @@ def quick_take_prompt(
     news_note: str,
     pool: list[Candidate] | None = None,
     earnings_flag: str = "—",
+    bundle: SignalBundle | None = None,
 ) -> str:
     """Render the quick-take prompt. Shared with the tier A/B harness."""
     pool = pool if pool is not None else [candidate]
@@ -174,6 +193,9 @@ def quick_take_prompt(
     return render(
         "quick_take",
         pool_note=PoolStats.build(pool).note(candidate, pool),
+        signal_note=(
+            bundle.prompt_block() if bundle else "No signal source ran for this candidate today."
+        ),
         checklist="\n".join(checklist),
         confirmed=confirmed,
         total_confirmations=len(CONFIRMATIONS),
@@ -213,6 +235,47 @@ def quick_take_prompt(
     )
 
 
+#: How far past the shortlist the signal layer looks. Signals can only promote
+#: a name they were run on, so the pool has to be wider than the shortlist for
+#: promotion to be possible at all — but every extra name costs an EDGAR round
+#: trip, so it is a multiple rather than the whole screen.
+SIGNAL_POOL_MULTIPLE = 2
+
+
+def select_with_signals(
+    candidates: list[Candidate],
+    hub: SignalHub | None,
+    run_date: date,
+    size: int,
+) -> list[tuple[Candidate, SignalBundle | None, int]]:
+    """Choose the ``size`` names worth spending quick-take tokens on.
+
+    Returns ``(candidate, bundle, screen_rank)`` in signal-adjusted order.
+    ``screen_rank`` is the name's 1-based place on screener score alone, so a
+    later reader can see which names the signals moved and by how much.
+
+    With no hub this is the old behaviour — the top ``size`` by screener score,
+    untouched.
+    """
+    screen_rank = {c.symbol: i + 1 for i, c in enumerate(candidates)}
+    if hub is None:
+        return [(c, None, screen_rank[c.symbol]) for c in candidates[:size]]
+
+    pool = candidates[: size * SIGNAL_POOL_MULTIPLE]
+    hub.collect([c.symbol for c in pool], run_date)
+    scored = [(c, hub.bundle(c.symbol, run_date)) for c in pool]
+    # Stable within a tie so the screener's own ordering still decides when the
+    # signal layer has nothing to say.
+    scored.sort(key=lambda pair: pair[0].score + pair[1].score_adjustment(), reverse=True)
+    chosen = [(c, b, screen_rank[c.symbol]) for c, b in scored[:size]]
+    promoted = [c.symbol for c, _, rank in chosen if rank > size]
+    if promoted:
+        log.info(
+            "Signal layer promoted %s into the shortlist over screener order", ", ".join(promoted)
+        )
+    return chosen
+
+
 def build_shortlist(
     candidates: list[Candidate],
     breadth: BreadthResult,
@@ -223,10 +286,11 @@ def build_shortlist(
     run_date: date,
     degraded: DegradedTracker,
     size: int = 8,
+    hub: SignalHub | None = None,
 ) -> list[ShortlistEntry]:
     """Take the top ``size`` candidates and enrich each with a FAST quick take."""
     entries: list[ShortlistEntry] = []
-    for candidate in candidates[:size]:
+    for candidate, bundle, screen_rank in select_with_signals(candidates, hub, run_date, size):
         earnings_note, earnings_flag = _earnings_note(calendar_view, candidate.symbol, run_date)
         news = finnhub.company_news(candidate.symbol, days=7, limit=3)
         news_note = (
@@ -240,6 +304,7 @@ def build_shortlist(
             news_note,
             pool=candidates,
             earnings_flag=earnings_flag,
+            bundle=bundle,
         )
 
         take: QuickTake | None = None
@@ -257,6 +322,8 @@ def build_shortlist(
                 earnings_flag=earnings_flag,
                 news_headline=news[0].headline if news else None,
                 degraded_reason=reason,
+                signals=bundle,
+                screen_rank=screen_rank,
             )
         )
 
@@ -264,7 +331,9 @@ def build_shortlist(
         key=lambda e: (
             e.priority,
             RATING_ORDER.get(e.take.rating, 0) if e.take else 0,
-            e.candidate.score,
+            # Signal-adjusted, so the layer breaks ties the quick take left
+            # level as well as deciding who made the pool in the first place.
+            e.adjusted_score,
         ),
         reverse=True,
     )

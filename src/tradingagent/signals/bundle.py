@@ -65,6 +65,22 @@ class SignalBundle:
         adjustment = self.score_adjustment()
         return 1 if adjustment > 0.5 else -1 if adjustment < -0.5 else 0
 
+    def readings(self) -> dict[str, int]:
+        """Source name -> direction held at decision time, for the journal.
+
+        Market-wide signals are included even though they do not move the
+        ranking: the accuracy tracker still wants to know whether the macro
+        read was right, and it can only learn that from a recorded direction.
+        A source firing more than once for one ticker is reduced to the sign of
+        its net, because that is the view it actually expressed.
+        """
+        totals: dict[str, float] = {}
+        for signal in self.ticker_signals + self.market_signals:
+            totals[signal.source] = totals.get(signal.source, 0.0) + signal.signed_strength
+        return {
+            source: 1 if total > 0 else -1 if total < 0 else 0 for source, total in totals.items()
+        }
+
     def summary(self) -> str:
         """One line for the shortlist table."""
         if not self.ticker_signals:
@@ -75,8 +91,14 @@ class SignalBundle:
         ]
         return f"{'; '.join(parts)} → {adjustment:+.1f} pts"
 
-    def prompt_block(self) -> str:
-        """The markdown handed to the analysts and the debate."""
+    def ticker_block(self) -> str:
+        """The per-ticker half of the signal layer, plus what failed to report.
+
+        Separate from :func:`market_block` because the market-wide half is
+        identical for every name and is rendered once into the shared market
+        context; repeating it per ticker would pay for the same tokens five
+        times and invite a role to read it as ticker-specific.
+        """
         out = [f"### Signal layer for {self.symbol}", ""]
         if self.ticker_signals:
             for signal in self.ticker_signals:
@@ -86,33 +108,42 @@ class SignalBundle:
             out += ["", f"Net effect on today's ranking: {self.score_adjustment():+.1f} points."]
         else:
             out.append("- No ticker-level signals fired for this name today.")
-
-        out += ["", "### Market-wide backdrop", ""]
-        if self.market_signals:
-            for signal in self.market_signals:
-                out.append(signal.line())
-                if signal.detail:
-                    out.append(signal.detail)
-            out += [
-                "",
-                "These are identical for every candidate today, so they do not change the "
-                "ranking. Use them to judge whether this setup is running with the tape "
-                "or against it.",
-            ]
-        else:
-            out.append("- No market-wide signals available this run.")
-
         if self.skipped:
-            out += [
-                "",
-                "### Sources that did not report",
-                "",
-                *[f"- {name}: {reason}" for name, reason in sorted(self.skipped.items())],
-                "",
-                "Do not infer anything from a source that did not run — absence here is a "
-                "gap in our data, not a neutral reading.",
-            ]
+            out += ["", *_skipped_lines(self.skipped)]
         return "\n".join(out)
+
+    def prompt_block(self) -> str:
+        """Ticker signals and the market backdrop together, for a standalone prompt."""
+        return "\n".join([self.ticker_block(), "", market_block(self.market_signals)])
+
+
+def market_block(signals: list[Signal]) -> str:
+    """The market-wide backdrop, rendered once per run for every role to share."""
+    out = ["### Signal layer — market-wide backdrop", ""]
+    if not signals:
+        out.append("- No market-wide signal source reported this run.")
+        return "\n".join(out)
+    for signal in signals:
+        out.append(signal.line())
+        if signal.detail:
+            out.append(signal.detail)
+    out += [
+        "",
+        "These readings are identical for every candidate today, so they do not change the "
+        "ranking. Use them to judge whether a setup is running with the tape or against it.",
+    ]
+    return "\n".join(out)
+
+
+def _skipped_lines(skipped: dict[str, str]) -> list[str]:
+    return [
+        "### Signal sources that did not report",
+        "",
+        *[f"- {name}: {reason}" for name, reason in sorted(skipped.items())],
+        "",
+        "Do not infer anything from a source that did not run — absence here is a gap in "
+        "our data, not a neutral reading.",
+    ]
 
 
 class SignalHub:
@@ -159,6 +190,17 @@ class SignalHub:
             weights=self.weights,
             skipped=self.skipped,
         )
+
+    @property
+    def market_signals(self) -> list[Signal]:
+        return [s for r in self.results for s in r.signals if s.symbol is None]
+
+    def market_block(self) -> str:
+        """The shared backdrop, plus this run's skipped sources."""
+        block = market_block(self.market_signals)
+        if self.skipped:
+            block += "\n\n" + "\n".join(_skipped_lines(self.skipped))
+        return block
 
     def source_rows(self) -> list[tuple[str, str, str]]:
         """Rows for the report's source table: (name, coverage, status)."""

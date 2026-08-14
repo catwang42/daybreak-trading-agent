@@ -38,6 +38,7 @@ from .discovery.shortlist import (
     build_shortlist,
     deep_dive_queue,
     market_commentary,
+    select_with_signals,
 )
 from .journal import append_entries, entries_from_deep, entries_from_shortlist
 from .llm import LLMGateway, TokenLedger, ledger as current_ledger, reset_ledger
@@ -46,6 +47,8 @@ from .pipeline.deep import DeepResult, run_queue
 from .report.deep import render_deep_index, render_deep_report
 from .report.render import DEEP_HEADING, ReportContext, render_daily_brief
 from .report.writer import replace_section, write_report
+from .signals import SignalHub, build_default_hub
+from .signals.accuracy import AccuracyReport, AccuracyTracker, realised_return
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +63,25 @@ class DiscoveryResult:
     report_path: str
     journal_written: int
     deep_context: DeepContext | None = None
+
+
+def build_signal_hub(
+    settings: Settings,
+    finnhub: FinnhubFree,
+    degraded: DegradedTracker,
+    market: MarketData,
+) -> tuple[SignalHub, AccuracyReport]:
+    """The four M3 sources, weighted by their record in the journal.
+
+    Rescoring is weekly (see :mod:`tradingagent.signals.accuracy`), so most runs
+    load the cached weights and download nothing. A run that cannot score — no
+    journal history yet — leaves every source at weight 1.0 rather than
+    guessing.
+    """
+    tracker = AccuracyTracker(settings.journal_path)
+    report = tracker.current(settings.run_date, realised=realised_return(market))
+    hub = build_default_hub(finnhub, degraded=degraded, weights=report.weights())
+    return hub, report
 
 
 @dataclass
@@ -92,12 +114,17 @@ def _market_context_block(
     breadth: BreadthResult,
     sector_map: SectorMap,
     macro_note: str,
+    signal_backdrop: str = "",
 ) -> str:
     """The shared market picture every deep-pipeline role is shown.
 
     Rendered once here rather than in each prompt so all twelve roles argue
     from the same numbers — a disagreement between them is then a disagreement
     about the evidence, not about which snapshot they happened to see.
+
+    ``signal_backdrop`` is the market-wide half of the M3 signal layer (FRED
+    macro regime, Polymarket odds, market news tone). It belongs here rather
+    than in each ticker's evidence because it is the same for every candidate.
     """
     index_lines = [
         f"  - {q.label} ({q.symbol}): 1d {q.ret('1d'):+.2f}%, 5d {q.ret('5d'):+.2f}%, "
@@ -128,6 +155,7 @@ def _market_context_block(
             "- Scheduled macro releases:\n"
             + "\n".join(f"  {line}" for line in macro_note.splitlines()),
         ]
+        + (["", signal_backdrop] if signal_backdrop else [])
     )
 
 
@@ -160,6 +188,9 @@ def build_deep_context(
                 earnings_note=earnings_note,
                 sector_note=_sector_note(sector_map, c.sector),
                 news_headline=entry.news_headline,
+                signal_block=entry.signals.ticker_block() if entry.signals else "",
+                signal_readings=entry.signals.readings() if entry.signals else {},
+                signal_adjustment=round(entry.score_adjustment, 2),
                 screener={
                     "score": c.score,
                     "rating": c.rating,
@@ -272,19 +303,23 @@ def run_discovery(
         len(eligible),
         len(candidates),
     )
+    hub, accuracy = build_signal_hub(settings, finnhub, degraded, market)
+
     shortlist: list[ShortlistEntry] = []
     commentary = "_LLM disabled for this run (--skip-llm)._"
     if skip_llm:
         degraded.add("LLM", "--skip-llm was set: no quick takes or commentary this run")
+        selected = select_with_signals(eligible, hub, run_date, size)
         shortlist = [
             ShortlistEntry(candidate=c, take=None, earnings_flag="—", news_headline=None,
-                           degraded_reason="LLM disabled")
-            for c in eligible[:size]
+                           degraded_reason="LLM disabled", signals=bundle, screen_rank=rank)
+            for c, bundle, rank in selected
         ]
     else:
         gateway = LLMGateway(settings, ledger)
         shortlist = build_shortlist(
-            eligible, breadth, sector_map, calendar_view, finnhub, gateway, run_date, degraded, size=size
+            eligible, breadth, sector_map, calendar_view, finnhub, gateway, run_date, degraded,
+            size=size, hub=hub,
         )
         commentary = market_commentary(
             gateway,
@@ -356,6 +391,9 @@ def run_discovery(
         stage="discovery",
         max_per_sector=MAX_PER_SECTOR,
         deep_cap=settings.deep_ticker_cap,
+        signal_rows=hub.source_rows(),
+        signal_backdrop=hub.market_block(),
+        signal_accuracy=accuracy.markdown(),
     )
     markdown = render_daily_brief(context)
     path = write_report(settings.report_dir() / "daily-brief.md", markdown, settings.reports_bucket)
@@ -366,7 +404,8 @@ def run_discovery(
         sector_map=sector_map,
         calendar_view=calendar_view,
         market_context=_market_context_block(
-            run_date, session_note, indices, vix, breadth, sector_map, macro_note
+            run_date, session_note, indices, vix, breadth, sector_map, macro_note,
+            signal_backdrop=hub.market_block(),
         ),
         macro_note=macro_note,
         data_as_of=data_as_of,

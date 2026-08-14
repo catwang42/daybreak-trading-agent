@@ -19,6 +19,7 @@ from ..discovery.screener import Candidate
 from ..discovery.sectors import SectorMap
 from ..discovery.shortlist import ShortlistEntry
 from ..llm import TokenLedger
+from ..signals.bundle import MAX_SCORE_ADJUSTMENT
 
 DISCLAIMER = (
     "Automated research output for personal study. Not financial advice. "
@@ -48,6 +49,11 @@ class ReportContext:
     stage: str = "discovery"
     max_per_sector: int = 3
     deep_cap: int = 3
+    # M3 signal layer: (source, coverage, status) per source, the shared
+    # market-wide backdrop, and the rolling accuracy table.
+    signal_rows: list[tuple[str, str, str]] = field(default_factory=list)
+    signal_backdrop: str = ""
+    signal_accuracy: str = ""
     # Set once the deep stage has run in the same process (``--stage all``);
     # a standalone ``--stage deep`` patches this section on disk instead.
     deep_index: str | None = None
@@ -176,6 +182,50 @@ def _section_sectors(ctx: ReportContext) -> str:
     return "\n".join(lines)
 
 
+def _signal_layer(ctx: ReportContext) -> str:
+    """The 4.x subsections: what each source said, what it moved, what it has earned.
+
+    Kept inside section 4 rather than given a number of its own because
+    ``config/report-schema.md`` fixes the eight top-level sections, and the
+    signal layer's whole job is to inform the shortlist above it.
+    """
+    if not ctx.signal_rows:
+        return "### Signal layer\n\n_No signal source ran this run._\n"
+
+    lines = ["### Signal layer", "", "| Source | Coverage | This run |", "|---|---|---|"]
+    lines += [f"| {name} | {coverage} | {status} |" for name, coverage, status in ctx.signal_rows]
+    lines.append("")
+
+    moved = [e for e in ctx.shortlist if abs(e.score_adjustment) >= 0.05]
+    if moved:
+        lines += [
+            "**What the signals moved.** The screener score is 0–100; the signal layer may "
+            f"add or remove at most {MAX_SCORE_ADJUSTMENT:.0f} points, so it can reorder a "
+            "shortlist but never override the price screen.",
+            "",
+            "| Ticker | Screener | Signal adj. | Adjusted | Rank on score alone → shown at |",
+            "|---|---:|---:|---:|---|",
+        ]
+        placement = {e.symbol: i + 1 for i, e in enumerate(ctx.shortlist)}
+        for e in moved:
+            shift = e.screen_rank - placement[e.symbol]
+            arrow = f" (**{shift:+d}**)" if shift and e.screen_rank else ""
+            lines.append(
+                f"| **{e.symbol}** | {e.candidate.score} | {e.score_adjustment:+.1f} | "
+                f"{e.adjusted_score:.1f} | {e.screen_rank or '—'} → {placement[e.symbol]}{arrow} |"
+            )
+        lines.append("")
+    else:
+        lines += ["No ticker-level signal was strong enough to move a score this run.", ""]
+
+    if ctx.signal_backdrop:
+        lines += [ctx.signal_backdrop, ""]
+    if ctx.signal_accuracy:
+        lines += ["#### Source accuracy (rolling, scored against the journal)", "",
+                  ctx.signal_accuracy, ""]
+    return "\n".join(lines)
+
+
 def _section_shortlist(ctx: ReportContext) -> str:
     lines = [
         "## 4. Shortlist",
@@ -184,18 +234,19 @@ def _section_shortlist(ctx: ReportContext) -> str:
         f"{len(ctx.candidates)} passed the momentum-burst filter; top {len(ctx.shortlist)} shown "
         f"(at most {ctx.max_per_sector} per sector).",
         "",
-        "| Ticker | Sector | Why it surfaced | Signals (M3+) | Quick rating | Priority | Earnings |",
+        "| Ticker | Sector | Why it surfaced | Signal bundle | Quick rating | Priority | Earnings |",
         "|---|---|---|---|---|---:|---|",
     ]
     for e in ctx.shortlist:
         c = e.candidate
         lines.append(
-            f"| **{c.symbol}** | {c.sector} | {c.why} | _pending M3_ | {e.rating_label} | "
+            f"| **{c.symbol}** | {c.sector} | {c.why} | {e.signal_note()} | {e.rating_label} | "
             f"{e.priority or '—'} | {e.earnings_flag} |"
         )
     if not ctx.shortlist:
         lines.append("| _no candidates passed today's filters_ | | | | | | |")
     lines.append("")
+    lines.append(_signal_layer(ctx))
 
     for e in ctx.shortlist:
         c = e.candidate
