@@ -353,12 +353,23 @@ def _violation_digest(error: Exception) -> str:
     parts = []
     for err in error.errors()[:4]:
         field = ".".join(str(loc) for loc in err["loc"]) or "<root>"
-        parts.append(f"{field}: {err['type']}")
+        detail = ""
+        if err["type"] == "json_invalid":
+            # "truncated mid-string" and "unescaped newline" are both json_invalid
+            # and want opposite fixes — a bigger budget vs. a lenient parse.
+            detail = f" ({str(err.get('ctx', {}).get('error', '')).split(' at line')[0]})"
+        parts.append(f"{field}: {err['type']}{detail}")
     return ", ".join(parts)
 
 
 def _parse_schema(raw: str, schema: type[ModelT]) -> ModelT:
-    """Validate ``raw`` against ``schema``, tolerating a markdown fence."""
+    """Validate ``raw`` against ``schema``, tolerating a markdown fence.
+
+    Also tolerates raw newlines and tabs inside JSON string values. The models
+    do this often when a prose field runs to several paragraphs; pydantic's
+    parser is strict and rejects it, but the reply is otherwise perfectly good,
+    and re-prompting to fix an escaping detail costs a whole call.
+    """
     text = raw.strip()
     fence = _FENCE_RE.search(text)
     if fence:
@@ -368,7 +379,16 @@ def _parse_schema(raw: str, schema: type[ModelT]) -> ModelT:
         if start == -1 or end <= start:
             raise ValueError(f"No JSON object found in model output: {raw[:200]!r}")
         text = text[start : end + 1]
-    return schema.model_validate_json(text)
+    try:
+        return schema.model_validate_json(text)
+    except ValidationError as exc:
+        if not _is_json_error(exc):
+            raise
+        return schema.model_validate(json.loads(text, strict=False))  # strict=False: allow \n in strings
+
+
+def _is_json_error(error: ValidationError) -> bool:
+    return any(err["type"] == "json_invalid" for err in error.errors())
 
 
 def smoke_test(tier: Tier = "fast", settings: Settings | None = None) -> dict[str, Any]:

@@ -172,3 +172,33 @@ def test_ledger_totals_across_tiers():
     assert ledger.total_tokens == 465
     assert ledger.total_calls == 3
     assert round(ledger.total_cost_usd, 4) == 0.0212
+
+
+def test_unescaped_newlines_in_prose_parse_without_a_reprompt():
+    """The models write multi-paragraph prose into a JSON string field often
+    enough that re-prompting over the escaping alone is a real surcharge."""
+    body = '{"rating": "Buy", "score": 7}'.replace("Buy", "Buy\nand hold\there")
+    gw = gateway([body])
+    result = gw.complete("go", tier="fast", schema=Reply)
+    assert result.rating == "Buy\nand hold\there"
+    assert len(gw.calls) == 1  # no repair round trip
+
+
+def test_a_genuinely_broken_reply_still_gets_its_one_reprompt():
+    gw = gateway(['{"rating": "Buy", "score":', '{"rating":"Hold","score":3}'])
+    assert gw.complete("go", tier="fast", schema=Reply).rating == "Hold"
+    assert len(gw.calls) == 2
+
+
+def test_violation_digest_separates_truncation_from_bad_escaping():
+    from tradingagent.llm import _violation_digest
+
+    def digest(text):
+        try:
+            Reply.model_validate_json(text)
+        except Exception as exc:
+            return _violation_digest(exc)
+        raise AssertionError("expected a validation error")
+
+    assert "EOF while parsing" in digest('{"rating": "Buy", "score":')
+    assert "control character" in digest('{"rating": "Bu\ny", "score": 7}')
