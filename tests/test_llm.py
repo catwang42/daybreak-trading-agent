@@ -1,7 +1,26 @@
-import pytest
-from pydantic import BaseModel
+import json
+from typing import Literal, get_args, get_origin
 
-from tradingagent.llm import LLMGateway, SchemaViolation, TokenLedger, _parse_schema
+import pytest
+from pydantic import BaseModel, Field
+
+from tradingagent.discovery.shortlist import QuickTake
+from tradingagent.llm import (
+    _CHARS_PER_TOKEN,
+    LLMGateway,
+    SchemaViolation,
+    TokenLedger,
+    _parse_schema,
+    token_budget,
+)
+from tradingagent.pipeline.schemas import (
+    AnalystReport,
+    DebateTurn,
+    PortfolioDecision,
+    ResearchPlan,
+    RiskTake,
+    TraderProposal,
+)
 
 
 class Reply(BaseModel):
@@ -66,6 +85,81 @@ def test_second_violation_raises_rather_than_looping():
         gw.complete("go", tier="fast", schema=Reply)
     assert len(gw.calls) == 2
     assert gw.ledger.by_tier["fast"].failures == 1
+
+
+ROLE_SCHEMAS = [
+    QuickTake,
+    AnalystReport,
+    DebateTurn,
+    ResearchPlan,
+    TraderProposal,
+    RiskTake,
+    PortfolioDecision,
+]
+
+
+def _maximal(schema):
+    """The longest instance ``schema`` would still accept."""
+
+    payload = {}
+    for name, info in schema.model_fields.items():
+        annotation = info.annotation
+        cap = next(
+            (m.max_length for m in info.metadata if hasattr(m, "max_length")), None
+        )
+        floor = next((m.ge for m in info.metadata if hasattr(m, "ge")), None)
+        if get_origin(annotation) is list:
+            payload[name] = ["y" * 250] * (cap or 3)
+        elif get_origin(annotation) is Literal:
+            payload[name] = get_args(annotation)[0]
+        elif annotation is str or str in get_args(annotation):
+            payload[name] = "y" * (cap or 400)
+        else:
+            payload[name] = floor if floor is not None else 1
+    return payload
+
+
+@pytest.mark.parametrize("schema", ROLE_SCHEMAS, ids=lambda s: s.__name__)
+def test_token_budget_covers_a_maximal_valid_instance(schema):
+    """Caps and completion budget are one constraint; they must move together.
+
+    Raising the character caps without raising ``max_tokens`` truncates the
+    reply mid-string, which surfaces as `json_invalid` — a re-prompt, and
+    sometimes a lost role — for output the schema would have accepted.
+    """
+    payload = _maximal(schema)
+    schema.model_validate(payload)  # the longest reply is a legal reply
+    longest = len(json.dumps(payload))
+    assert token_budget(schema) * _CHARS_PER_TOKEN >= longest, (
+        f"{schema.__name__}: budget holds "
+        f"{int(token_budget(schema) * _CHARS_PER_TOKEN)} chars, maximal reply is {longest}"
+    )
+
+
+def test_token_budget_tracks_a_cap_change():
+    """The budget is derived, not copied — no call site to update by hand."""
+
+    class Narrow(BaseModel):
+        text: str = Field(max_length=200)
+
+    class Wide(BaseModel):
+        text: str = Field(max_length=8000)
+
+    assert token_budget(Wide) > token_budget(Narrow)
+    assert token_budget(Narrow) == 600  # floor: schemas this small still need room
+
+
+def test_schema_call_defaults_its_budget_from_the_schema():
+    gw = gateway([])
+    seen = {}
+
+    def fake_call(prompt, *, tier, system, max_tokens, temperature):
+        seen["max_tokens"] = max_tokens
+        return json.dumps(_maximal(PortfolioDecision))
+
+    gw._call = fake_call
+    gw.complete("go", tier="deep", schema=PortfolioDecision)
+    assert seen["max_tokens"] == token_budget(PortfolioDecision)
 
 
 def test_ledger_totals_across_tiers():

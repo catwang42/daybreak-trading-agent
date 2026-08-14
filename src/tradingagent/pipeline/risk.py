@@ -109,7 +109,7 @@ def run_risk_committee(
                 ),
             )
             try:
-                take = gateway.complete(prompt, tier="smart", schema=RiskTake, max_tokens=1100)
+                take = gateway.complete(prompt, tier="smart", schema=RiskTake)
                 review.voices.append(RiskVoice(seat=seat, round_number=round_number, take=take))
             except LLMError as exc:
                 reason = str(exc)[:200]

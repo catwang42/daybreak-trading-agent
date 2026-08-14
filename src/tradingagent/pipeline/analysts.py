@@ -78,7 +78,7 @@ def run_analysts(
             market_context=evidence.market_context,
         )
         try:
-            report = gateway.complete(prompt, tier="fast", schema=AnalystReport, max_tokens=1200)
+            report = gateway.complete(prompt, tier="fast", schema=AnalystReport)
             results.append(AnalystResult(key=key, label=label, report=report))
         except LLMError as exc:
             reason = str(exc)[:200]

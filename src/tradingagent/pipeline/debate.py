@@ -121,7 +121,7 @@ def run_debate(
                 total_rounds=rounds,
             )
             try:
-                turn = gateway.complete(prompt, tier="smart", schema=DebateTurn, max_tokens=1400)
+                turn = gateway.complete(prompt, tier="smart", schema=DebateTurn)
                 result.turns.append(Turn(side=side, round_number=round_number, turn=turn))
             except LLMError as exc:
                 reason = str(exc)[:200]
@@ -139,7 +139,7 @@ def run_debate(
         debate_transcript=result.transcript(),
     )
     try:
-        result.plan = gateway.complete(prompt, tier="smart", schema=ResearchPlan, max_tokens=1400)
+        result.plan = gateway.complete(prompt, tier="smart", schema=ResearchPlan)
     except LLMError as exc:
         result.plan_error = str(exc)[:200]
         degraded.add(f"Research manager {evidence.symbol}", result.plan_error)

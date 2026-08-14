@@ -24,7 +24,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, TypeVar, get_args, get_origin
 
 from pydantic import BaseModel, ValidationError
 from tenacity import (
@@ -158,7 +158,7 @@ class LLMGateway:
         *,
         tier: Tier = "fast",
         system: str | None = None,
-        max_tokens: int = 1024,
+        max_tokens: int | None = None,
         temperature: float = 0.2,
         schema: type[ModelT] | None = None,
     ) -> str | ModelT:
@@ -167,9 +167,15 @@ class LLMGateway:
         With ``schema``, the reply is parsed as JSON and validated against the
         pydantic model; on violation the model is re-prompted exactly once with
         the validation error before :class:`SchemaViolation` is raised.
+
+        ``max_tokens`` defaults to :func:`token_budget` of the schema, so a
+        caller cannot ask for output the budget cannot hold.
         """
         if schema is None:
-            return self._call(prompt, tier=tier, system=system, max_tokens=max_tokens, temperature=temperature)
+            return self._call(
+                prompt, tier=tier, system=system, max_tokens=max_tokens or 1024, temperature=temperature
+            )
+        max_tokens = max_tokens or token_budget(schema)
 
         json_prompt = f"{prompt}\n\n{_schema_instruction(schema)}"
         raw = self._call(json_prompt, tier=tier, system=system, max_tokens=max_tokens, temperature=temperature)
@@ -292,6 +298,48 @@ def _schema_instruction(schema: type[BaseModel]) -> str:
 
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
+
+# -- completion budgets ---------------------------------------------------
+# A schema's ``max_length`` caps and the call's ``max_tokens`` are the same
+# constraint measured in two units, and they have to move together. Raising the
+# caps alone lets the model write a longer reply that the budget then truncates
+# mid-string: the failure arrives as `json_invalid` rather than
+# `string_too_long`, costs a re-prompt, and can lose the role entirely — which
+# is what happened to the portfolio manager the first time the caps went up.
+# Deriving the budget from the schema removes the chance to update one and
+# forget the other.
+_CHARS_PER_TOKEN = 3.0  # conservative: JSON escaping and prose both run short of 4
+_UNCAPPED_STR_CHARS = 400
+_LIST_ITEM_CHARS = 250
+_BUDGET_HEADROOM = 1.25
+_BUDGET_FLOOR = 600
+
+
+def _max_length(info: Any) -> int | None:
+    return next((m.max_length for m in getattr(info, "metadata", ()) if hasattr(m, "max_length")), None)
+
+
+def token_budget(schema: type[BaseModel]) -> int:
+    """Completion tokens enough to hold a maximal valid instance of ``schema``.
+
+    Every string field is assumed to run to its cap, every list to its item
+    limit, plus the JSON scaffolding. The estimate errs high on purpose:
+    unused budget is not billed — providers charge generated tokens — so the
+    only cost of a generous ceiling is that a runaway reply runs longer before
+    it is cut off.
+    """
+    chars = 0
+    for name, info in schema.model_fields.items():
+        chars += len(name) + 8  # `"name": "...",`
+        annotation = info.annotation
+        if get_origin(annotation) is list:
+            chars += (_max_length(info) or 3) * _LIST_ITEM_CHARS
+        elif annotation is str or str in get_args(annotation):  # str, or `str | None`
+            chars += _max_length(info) or _UNCAPPED_STR_CHARS
+        else:
+            chars += 24  # numbers, enums, short literals
+    return max(_BUDGET_FLOOR, int(chars / _CHARS_PER_TOKEN * _BUDGET_HEADROOM))
 
 
 def _violation_digest(error: Exception) -> str:
