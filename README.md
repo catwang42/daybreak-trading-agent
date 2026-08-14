@@ -8,7 +8,7 @@ A provider-agnostic Python application, built with Claude Code as the coding ass
 |---|---|---|
 | M1 | `--stage discovery` — breadth, sectors, screener, calendar, shortlist, report, journal | **done** |
 | M2 | `--stage deep` — TradingAgents debate pipeline (4 analysts → bull/bear debate → trader → risk committee → portfolio manager) | **done** |
-| M3 | signal bundle (Reddit, EDGAR, FRED, Polymarket) | not started |
+| M3 | signal bundle — news tone, SEC Form 4, FRED macro, Polymarket odds, plus a source-accuracy tracker | **done** |
 | M4 | `--stage options` — CSP / covered-call candidates | not started |
 | M5 | Cloud Run Jobs schedule + delivery | scaffolded in `deploy/` |
 
@@ -101,12 +101,41 @@ and attributes each ticker's spend to the tier that incurred it.
 |---|---|---|
 | yfinance | OHLCV for the S&P 500 universe, index proxies, sector ETFs, VIX; fundamentals, quarterly statements, analyst targets, short interest | unofficial API, rate-limited; `info` fields come and go, each is validated |
 | Alpaca (paper) | market clock/calendar, snapshot cross-check | paper endpoints only, enforced in code |
-| Finnhub | earnings calendar, company news | economic calendar is premium (403) → static fallback |
+| Finnhub | earnings calendar, company news, news-tone signal | economic calendar is premium (403) → static fallback |
+| RSS (Nasdaq, Seeking Alpha, Yahoo) | market-wide headline tone | unkeyed, no published limit |
+| SEC EDGAR | Form 4 insider transactions | unkeyed but fair-access rules apply: `SEC_USER_AGENT` must carry a real contact address or the source skips itself; throttled to 5 req/s against their 10 |
+| FRED | macro regime — credit spreads, VIX, curve, yields, claims, dollar | free with a key, no meaningful limit at this volume |
+| Polymarket Gamma | event odds on Fed, recession, shutdown, tariffs | public read API, unkeyed |
 | bundled `sp500.json` | universe + GICS sectors | snapshot; refresh with `--refresh-universe` |
 
 Any source that fails is named in report section 7 as
 `DEGRADED — missing: …`; the run never silently produces a thin report. Paid upgrades
 that would remove a limitation are listed there too, and never purchased automatically.
+
+## Signal layer
+
+Four independent sources run once per discovery pass and fuse into a per-ticker bundle
+(`src/tradingagent/signals/`). They share nothing but the `SignalSource` contract, so a
+fifth — social sentiment, blocked on Reddit's manual API approval — is a registry edit,
+and dropping a noisy one is a one-line change.
+
+The bundle acts in two places, and deliberately nowhere else:
+
+- **Ranking.** Ticker-level signals adjust the screener score by at most ±8 points, so
+  they can promote a name a few places but never override the price screen. The shortlist
+  scores twice as many candidates as it keeps, which is what lets a signal pull a name up
+  from below the cut. Report section 4 shows every adjustment and the rank each name would
+  have had on the screener score alone.
+- **Prompts.** Ticker signals reach the news and sentiment analysts inside the evidence
+  pack; the market-wide backdrop goes into the shared market context every role sees.
+  Market-wide signals never touch the ranking — they shift all candidates equally, so
+  scoring them would reorder nothing.
+
+Each source's direction is recorded in the journal *before* the outcome is known, which is
+what lets `signals/accuracy.py` grade it later: rolling hit rate over 90 days, rescored
+weekly, mapped to a 0.5–1.5 weight and shrunk towards 1.0 while the sample is thin.
+Abstentions are not scored, and moves inside a ±1% dead band are dropped rather than
+graded as misses. Until a source has a record it runs at weight 1.000.
 
 ## Guardrails
 
@@ -120,7 +149,7 @@ that would remove a limitation are listed there too, and never purchased automat
 ## Tests
 
 ```bash
-pytest -q     # 121 tests; reference/ cookbooks are excluded from collection
+pytest -q     # 200 tests; reference/ cookbooks are excluded from collection
 ```
 
 ## Build with Claude Code

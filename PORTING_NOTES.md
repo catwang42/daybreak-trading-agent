@@ -64,6 +64,39 @@ deep-dive queue M2 consumes.
   (extended run-up, recent breakdown, narrow prior-day range), and the
   A / A− / B / Watch / Reject rating bands over a 100-point component budget.
 
+## Signal mapping (M3 → src/tradingagent/signals/)
+
+Mostly *not* a port. Only one of the four sources has an upstream ancestor; the
+other three are endpoints no cookbook touches, and the fusion layer is ours
+because upstream has nothing equivalent to fuse.
+
+| Local module | Upstream ancestor | What is ours |
+|---|---|---|
+| `news.py` | `dataflows/finnhub_utils.py` (Apache-2.0, `a33fd4c`) — the 7-day company-news window and the headline+source rendering | the tone lexicon, the negation window, the market-wide RSS leg |
+| `insiders.py` | none — EDGAR is in no cookbook | all of it: CIK lookup, Form 4 XML parsing, 10b5-1 labelling, the 5 req/s throttle |
+| `macro.py` | none — no cookbook reads FRED | all of it: the six series, the per-series direction rules and materiality bands |
+| `prediction.py` | none — no cookbook reads a prediction market | all of it: topic classification, multi-leg probability aggregation, change-based scoring |
+| `bundle.py`, `accuracy.py` | none | the fusion rule and the source-accuracy tracker |
+
+Three decisions worth stating, because each is a place a reader could
+reasonably expect the opposite:
+
+- **Headline tone is a lexicon, not an LLM call.** Every headline already goes
+  into the analyst prompts verbatim, so a second model pass would be buying an
+  opinion we are about to form anyway. What the lexicon buys is the thing the
+  LLM cannot give: a number that is stable across runs and can therefore be
+  scored against outcomes. Cost: it is blind to sarcasm and to any phrasing
+  outside the word list, and it abstains rather than guessing when it sees one.
+- **Market-wide signals do not move the ranking.** Macro and prediction-market
+  reads are identical for every candidate, so scoring them would shift all
+  scores equally and reorder nothing. They go into the shared market context
+  instead, where they can change an argument even though they cannot change a
+  rank.
+- **Prediction markets are read by their weekly change, not their level.** A
+  probability everyone already knows is not information; the repricing is. See
+  the commit message on `prediction.py` for the three live-feed defects that
+  forced this.
+
 ## Options mapping (staskh → src/tradingagent/options/)
 | Skill/tool | Local module | Notes |
 |---|---|---|
@@ -124,9 +157,13 @@ deep-dive queue M2 consumes.
   (`risk_ruling`), so it cannot be skipped.
 - **Sentiment analyst reads positioning, not social media.** Upstream has separate
   sentiment and social-media seats over Reddit and StockTwits. Free, reliable social data
-  is the gap; until PRAW lands in M3 the single merged seat reads sell-side posture,
-  target dispersion, short interest and holder mix — positioning rather than chatter. The
-  report says so rather than implying a social read happened.
+  is still the gap: PRAW was scoped for M3 and dropped from it because the Reddit API now
+  requires manual approval and ours is pending. The single merged seat reads sell-side
+  posture, target dispersion, short interest and holder mix, plus the M3 insider and news-
+  tone signals — positioning and disclosed action rather than chatter. Neither is a proxy
+  for retail sentiment, and the prompt says so rather than letting a role treat them as
+  one. A fifth source implementing `SignalSource` is the whole change needed when the
+  approval lands; nothing in the bundle, ranking, prompts or tracker moves.
 - **Screener liquidity floor uses average *share* volume**, per `config/preferences.md`
   (1M shares), not the dollar-volume floor some upstream variants use.
 
