@@ -18,7 +18,12 @@ Deviations from upstream:
   enforces — an early run asked the portfolio manager for a ruling with no
   stated budget, blew a 900-character cap twice, and lost the verdict to
   DEGRADED. Word counts stay in the descriptions as style guidance; the
-  character number is the contract.
+  character number is the contract. Gate 2 then showed the models overrunning
+  even a stated cap seven times in 36 calls (a 16% re-prompt surcharge), so the
+  four schemas that fired — DebateTurn, ResearchPlan, RiskTake,
+  PortfolioDecision — carry ~40% more headroom than the word target implies.
+  The caps exist to stop one role inflating the next role's prompt, not to
+  enforce brevity; the word count does that.
 - ``confidence`` (L/M/H) is added to the portfolio decision because
   ``config/report-schema.md`` requires it in the per-ticker verdict line.
 """
@@ -94,24 +99,24 @@ class DebateTurn(BaseModel):
     """One bull or bear turn (SMART tier)."""
 
     argument: str = Field(
-        max_length=2500,
+        max_length=3500,
         description=(
             "Your case, engaging directly with the other side's last turn rather "
-            "than listing data. Conversational, at most 2500 characters (roughly "
-            "250 words)."
+            "than listing data. Conversational; aim for 250 words, hard limit "
+            "3500 characters."
         ),
     )
     strongest_point: str = Field(
-        max_length=500,
+        max_length=700,
         description=(
-            "The single strongest point in your case, in one sentence of at most "
-            "500 characters."
+            "The single strongest point in your case, in one sentence. Hard limit "
+            "700 characters."
         ),
     )
     concession: str = Field(
-        max_length=500,
+        max_length=700,
         description=(
-            "The one thing the other side is right about, in at most 500 "
+            "The one thing the other side is right about; hard limit 700 "
             "characters. Never write 'nothing' — if you cannot find a concession "
             "you have not read their argument."
         ),
@@ -129,17 +134,17 @@ class ResearchPlan(BaseModel):
         )
     )
     resolution: str = Field(
-        max_length=1500,
+        max_length=2100,
         description=(
             "Which arguments carried the debate and why, naming the bull and bear "
-            "points you are ruling on. At most 1500 characters (roughly 150 words)."
+            "points you are ruling on. Aim for 150 words, hard limit 2100 characters."
         ),
     )
     strategic_actions: str = Field(
-        max_length=1200,
+        max_length=1700,
         description=(
             "Concrete instructions for the trader, including position-sizing "
-            "guidance consistent with the rating. At most 1200 characters."
+            "guidance consistent with the rating. Hard limit 1700 characters."
         ),
     )
 
@@ -173,18 +178,18 @@ class RiskTake(BaseModel):
     """One risk analyst's critique of the trader's proposal (SMART tier)."""
 
     argument: str = Field(
-        max_length=2000,
+        max_length=2800,
         description=(
             "Your critique, answering the other risk analysts directly. "
-            "Conversational, no headings, at most 2000 characters (roughly 180 "
-            "words)."
+            "Conversational, no headings; aim for 180 words, hard limit 2800 "
+            "characters."
         ),
     )
     recommended_adjustment: str = Field(
-        max_length=500,
+        max_length=700,
         description=(
             "The one concrete change you want made to the trade — size, stop, "
-            "timing, or 'no change' with a reason. At most 500 characters."
+            "timing, or 'no change' with a reason. Hard limit 700 characters."
         ),
     )
 
@@ -213,32 +218,32 @@ class PortfolioDecision(BaseModel):
         default=None, description="Holding period the rating applies to, e.g. '4-8 weeks'."
     )
     executive_summary: str = Field(
-        max_length=1100,
+        max_length=1500,
         description=(
-            "Entry strategy, sizing, key levels, horizon. 2-4 sentences, at most "
-            "1100 characters."
+            "Entry strategy, sizing, key levels, horizon. 2-4 sentences, hard "
+            "limit 1500 characters."
         ),
     )
     investment_thesis: str = Field(
-        max_length=2200,
+        max_length=3100,
         description=(
             "The reasoning, anchored in specific evidence from the debate and the "
-            "risk review. At most 2200 characters (roughly 200 words)."
+            "risk review. Aim for 200 words, hard limit 3100 characters."
         ),
     )
     risk_ruling: str = Field(
-        max_length=1600,
+        max_length=2200,
         description=(
             "Your ruling on the risk debate: which of the aggressive, "
             "conservative, and neutral analysts you sided with, and what you "
-            "changed in the trade as a result. At most 1600 characters."
+            "changed in the trade as a result. Hard limit 2200 characters."
         ),
     )
     invalidation: str = Field(
-        max_length=500,
+        max_length=700,
         description=(
             "The specific observable that would prove this call wrong. One "
-            "sentence, at most 500 characters."
+            "sentence, hard limit 700 characters."
         ),
     )
 
