@@ -142,6 +142,11 @@ class Settings:
     alpaca_secret: str
     alpaca_paper: bool
     finnhub_key: str
+    # Signal layer (M3). All optional: each source skips itself with a visible
+    # reason when its key is absent, so a partial configuration degrades the
+    # report rather than failing the run.
+    fred_key: str
+    sec_user_agent: str
     # --- Output ---
     reports_bucket: str
     deep_ticker_cap: int
@@ -189,6 +194,8 @@ def load_settings(run_date: date | None = None, env_file: Path | None = None) ->
         alpaca_secret=env("ALPACA_SECRET_KEY"),
         alpaca_paper=paper,
         finnhub_key=env("FINNHUB_API_KEY"),
+        fred_key=env("FRED_API_KEY"),
+        sec_user_agent=env("SEC_USER_AGENT"),
         reports_bucket=env("REPORTS_BUCKET"),
         deep_ticker_cap=env_int("DEEP_TICKER_CAP", prefs.deep_cap),
         debate_rounds=min(env_int("DEBATE_ROUNDS", 1), 2),
