@@ -7,7 +7,7 @@ A provider-agnostic Python application, built with Claude Code as the coding ass
 | Milestone | Stage | State |
 |---|---|---|
 | M1 | `--stage discovery` — breadth, sectors, screener, calendar, shortlist, report, journal | **done** |
-| M2 | `--stage deep` — TradingAgents debate pipeline | not started |
+| M2 | `--stage deep` — TradingAgents debate pipeline (4 analysts → bull/bear debate → trader → risk committee → portfolio manager) | **done** |
 | M3 | signal bundle (Reddit, EDGAR, FRED, Polymarket) | not started |
 | M4 | `--stage options` — CSP / covered-call candidates | not started |
 | M5 | Cloud Run Jobs schedule + delivery | scaffolded in `deploy/` |
@@ -20,26 +20,55 @@ Python 3.11+ is required.
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp config/.env.example config/.env   # fill free keys + LLM provider
-python -m tradingagent --stage discovery
+export PYTHONPATH=src                # the package is not pip-installed; the image sets this itself
+python -m tradingagent --stage all
 ```
 
-Output lands in `reports/<date>/daily-brief.md` and appends to `journal/journal.jsonl`
-(both git-ignored; set `REPORTS_BUCKET` to mirror them to GCS instead).
+Output lands in `reports/<date>/daily-brief.md`, per-ticker analyses in
+`reports/<date>/deep/<SYM>.md`, and appends to `journal/journal.jsonl` (all git-ignored;
+set `REPORTS_BUCKET` to mirror them to GCS instead).
 
 ### CLI
 
 ```
-python -m tradingagent --stage discovery        # today's full scan
+python -m tradingagent --stage all              # discovery + deep, one shared ledger
+                       --stage discovery        # scan, screen, shortlist, queue only
+                       --stage deep             # deep-dive the queue from an earlier discovery
                        --date 2026-08-13        # re-run for a past session
                        --shortlist 5            # shortlist size (default 10)
                        --limit 100              # cap universe, for quick smoke runs
+                       --tickers CRM,V,FDX      # deep-stage override, ignores the queue
                        --refresh-universe       # re-pull S&P 500 constituents
                        --skip-llm               # data + screener only, zero token cost
                        --verbose
 ```
 
 `--skip-llm` is the cheapest way to sanity-check a data change: it produces the same
-report minus the commentary and quick takes.
+discovery report minus the commentary and quick takes. It is refused on `deep` and `all`,
+which are nothing but LLM calls.
+
+### The deep stage
+
+`discovery` writes `reports/<date>/discovery-context.json` — the market-context block plus
+a sector-diversified queue of up to 10 names. `deep` reads it, takes the top
+`DEEP_TICKER_CAP` (default 3, cap 5), and runs each ticker through **12 LLM calls**:
+
+| Step | Seats | Tier |
+|---|---|---|
+| analysts | technical, fundamentals, news, sentiment/positioning | fast × 4 |
+| debate | bull, bear (1 round default, `DEBATE_ROUNDS` max 2), research manager | smart × 3 |
+| trade | trader | smart × 1 |
+| risk | aggressive, conservative, neutral | smart × 3 |
+| verdict | portfolio manager — rating, confidence, target, risk ruling | deep × 1 |
+
+Each ticker gets its own report and section 5 of the daily brief becomes an index of
+verdicts, links, and per-ticker cost. A role whose output fails its schema is re-prompted
+once; if it fails again that ticker is marked DEGRADED and the report says which seat
+fell over, rather than dropping the name.
+
+Running `deep` standalone the morning after a discovery run is supported — it reuses the
+stored context instead of re-screening the universe, so it only downloads bars for the
+queued names.
 
 ### LLM configuration
 
@@ -49,8 +78,8 @@ set by env — the code never names a provider:
 | Tier | Env var | Used by |
 |---|---|---|
 | fast | `LLM_FAST_MODEL` | the four analysts, quick takes, summarization |
-| smart | `LLM_SMART_MODEL` | research manager, risk judge (M2) |
-| deep | `LLM_DEEP_MODEL` | portfolio manager (M2); falls back to smart if unset |
+| smart | `LLM_SMART_MODEL` | bull/bear researchers, research manager, trader, the three risk seats |
+| deep | `LLM_DEEP_MODEL` | portfolio-manager verdict only; falls back to smart if unset |
 
 Default config targets Vertex AI with Application Default Credentials
 (`VERTEXAI_PROJECT` / `VERTEXAI_LOCATION`, no API key). Switching to Anthropic, Gemini,
@@ -58,18 +87,19 @@ or a local Ollama is three env-var edits — see the commented block in
 `config/.env.example`. Verify a provider before relying on it:
 
 ```bash
-python -c "from tradingagent.config import load_settings; from tradingagent.llm import LLMGateway; \
+PYTHONPATH=src python -c "from tradingagent.config import load_settings; from tradingagent.llm import LLMGateway; \
            print(LLMGateway(load_settings()).smoke_test('fast'))"
 ```
 
 Per-run token usage and estimated cost are accumulated in a `TokenLedger` and printed in
-the report footer, broken out by tier.
+the report footer, broken out by tier. The deep stage additionally prints per-ticker cost
+and attributes each ticker's spend to the tier that incurred it.
 
 ## Data sources (free tiers only)
 
 | Source | Used for | Free-tier limits |
 |---|---|---|
-| yfinance | OHLCV for the S&P 500 universe, index proxies, sector ETFs, VIX | unofficial API, rate-limited |
+| yfinance | OHLCV for the S&P 500 universe, index proxies, sector ETFs, VIX; fundamentals, quarterly statements, analyst targets, short interest | unofficial API, rate-limited; `info` fields come and go, each is validated |
 | Alpaca (paper) | market clock/calendar, snapshot cross-check | paper endpoints only, enforced in code |
 | Finnhub | earnings calendar, company news | economic calendar is premium (403) → static fallback |
 | bundled `sp500.json` | universe + GICS sectors | snapshot; refresh with `--refresh-universe` |
@@ -83,19 +113,19 @@ that would remove a limitation are listed there too, and never purchased automat
 - Research only. `ALPACA_PAPER=true` is asserted at startup and the Alpaca client refuses
   to construct otherwise; no order-placement code path exists.
 - Secrets come from env / Secret Manager only, and are never written to reports or logs.
-- Every report ends with the verbatim disclaimer from `config/report-schema.md`, and
-  every shortlisted name is appended to `journal/journal.jsonl` for later outcome
-  scoring.
+- Every report ends with the verbatim disclaimer from `config/report-schema.md`. Every
+  shortlisted name is appended to `journal/journal.jsonl`, and every deep verdict is
+  appended again with its rating, confidence and price target, for later outcome scoring.
 
 ## Tests
 
 ```bash
-pytest -q     # 76 tests; reference/ cookbooks are excluded from collection
+pytest -q     # 121 tests; reference/ cookbooks are excluded from collection
 ```
 
 ## Build with Claude Code
 
-`git init`, push to GitHub, open Claude Code at repo root, paste the Milestone 1 prompt from `PROMPTS.md`. Claude Code follows `CLAUDE.md`; the app it produces has zero Claude-specific runtime dependencies.
+`git init`, push to GitHub, open Claude Code at repo root, paste the milestone prompt from `PROMPTS.md`. Claude Code follows `CLAUDE.md`; the app it produces has zero Claude-specific runtime dependencies — no `.claude/` folder, skills, or MCP servers are needed to run it.
 
 ## Deploy
 
