@@ -7,4 +7,6 @@ venv/
 .pytest_cache/
 reports/*
 !reports/.gitkeep
+journal/*
+!journal/.gitkeep
 .gcloud/

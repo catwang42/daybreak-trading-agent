@@ -1,11 +1,28 @@
-# pinned by Claude Code during Milestone 1
-litellm
-yfinance
-alpaca-py
-finnhub-python
-pandas
-typer
-pydantic
-tenacity
-python-dotenv
-feedparser
+# Pinned during Milestone 1. Python 3.11+.
+# The runtime is provider-agnostic: litellm is the only LLM dependency and the
+# model strings come from env. google-cloud-aiplatform is required by litellm's
+# vertex_ai path (it imports `vertexai`); drop it if you switch providers.
+
+# --- LLM gateway ---
+litellm==1.96.2
+google-auth==2.56.3
+google-cloud-aiplatform==1.164.0
+
+# --- Market data (free tiers) ---
+yfinance==1.6.0
+alpaca-py==0.44.0
+finnhub-python==2.4.29
+feedparser==6.0.14
+requests==2.34.2
+lxml==6.1.1          # pandas.read_html backend for universe.fetch_live()
+
+# --- Core ---
+pandas==3.0.5
+numpy==2.4.6
+typer==0.27.1
+pydantic==2.13.4
+tenacity==9.1.4
+python-dotenv==1.2.2
+
+# --- Dev ---
+pytest==9.1.1
