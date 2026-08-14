@@ -17,7 +17,7 @@ from ..discovery.breadth import BreadthResult
 from ..discovery.calendar import CalendarView
 from ..discovery.screener import Candidate
 from ..discovery.sectors import SectorMap
-from ..discovery.shortlist import ShortlistEntry
+from ..discovery.shortlist import SIGNAL_POOL_MULTIPLE, ShortlistEntry
 from ..llm import TokenLedger
 from ..signals.bundle import MAX_SCORE_ADJUSTMENT
 
@@ -198,23 +198,38 @@ def _signal_layer(ctx: ReportContext) -> str:
 
     moved = [e for e in ctx.shortlist if abs(e.score_adjustment) >= 0.05]
     if moved:
+        size = len(ctx.shortlist)
+        promoted = [e for e in moved if e.screen_rank > size]
         lines += [
-            "**What the signals moved.** The screener score is 0–100; the signal layer may "
-            f"add or remove at most {MAX_SCORE_ADJUSTMENT:.0f} points, so it can reorder a "
-            "shortlist but never override the price screen.",
+            "**What the signals moved.** The screener ranks the whole pool on price action "
+            f"alone; the shortlist is then picked from its top {size * SIGNAL_POOL_MULTIPLE} by "
+            f"screener score plus the signal adjustment, which is capped at "
+            f"±{MAX_SCORE_ADJUSTMENT:.0f} points. So the layer decides *who makes this list*, "
+            "and never overrides the price screen.",
             "",
-            "| Ticker | Screener | Signal adj. | Adjusted | Rank on score alone → shown at |",
-            "|---|---:|---:|---:|---|",
+            "| Ticker | Screener score | Screener rank | Signal adj. | Adjusted | Made the list because of signals |",
+            "|---|---:|---:|---:|---:|---|",
         ]
-        placement = {e.symbol: i + 1 for i, e in enumerate(ctx.shortlist)}
         for e in moved:
-            shift = e.screen_rank - placement[e.symbol]
-            arrow = f" (**{shift:+d}**)" if shift and e.screen_rank else ""
+            gained = e.screen_rank > size
+            note = f"**yes** — screener had it {e.screen_rank}th, outside the top {size}" if gained else "no"
             lines.append(
-                f"| **{e.symbol}** | {e.candidate.score} | {e.score_adjustment:+.1f} | "
-                f"{e.adjusted_score:.1f} | {e.screen_rank or '—'} → {placement[e.symbol]}{arrow} |"
+                f"| **{e.symbol}** | {e.candidate.score} | {e.screen_rank or '—'} | "
+                f"{e.score_adjustment:+.1f} | {e.adjusted_score:.1f} | {note} |"
             )
-        lines.append("")
+        lines += [
+            "",
+            f"{len(promoted)} of {size} shortlisted names were promoted past the screener's own "
+            "cut by the signal layer."
+            if promoted
+            else "No name was promoted past the screener's own cut this run; the adjustments "
+            "only reordered names the screener had already selected.",
+            "",
+            "_Ordering within the shortlist below is set first by the quick take's priority and "
+            "rating and then interleaved by sector momentum, so a name's position there is not "
+            "a signal-layer effect. Membership and tie-breaking are._",
+            "",
+        ]
     else:
         lines += ["No ticker-level signal was strong enough to move a score this run.", ""]
 

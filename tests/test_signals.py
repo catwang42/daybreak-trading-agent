@@ -536,6 +536,35 @@ def test_moves_inside_the_dead_band_are_dropped_rather_than_graded_as_misses():
     assert report.scores == {} and report.unresolved == 1
 
 
+def test_rerunning_a_day_does_not_multiply_a_sources_evidence():
+    """The journal is append-only and --date re-runs a session, so the same
+    call lands several times. Counting each copy would let a source quadruple
+    its record by being re-run."""
+    same_call = [entry("AAA", RUN, {"src": 1}) for _ in range(4)]
+    report = A.score_entries(same_call, fixed(6.0), RUN)
+    assert (report.scores["src"].samples, report.scores["src"].hits) == (1, 1)
+
+
+def test_a_rerun_that_changed_its_mind_is_scored_on_the_latest_belief():
+    entries = [entry("AAA", RUN, {"src": 1}), entry("AAA", RUN, {"src": -1})]
+    report = A.score_entries(entries, fixed(6.0), RUN)
+    assert (report.scores["src"].samples, report.scores["src"].hits) == (1, 0)
+
+
+def test_the_two_stages_of_one_day_are_separate_calls():
+    """A quick take and a deep verdict on the same name are two decisions."""
+    rows = [
+        {**entry("AAA", RUN, {"src": 1}), "stage": "discovery"},
+        {**entry("AAA", RUN, {"src": 1}), "stage": "deep"},
+    ]
+    assert A.score_entries(rows, fixed(6.0), RUN).scores["src"].samples == 2
+
+
+def test_different_tickers_on_one_day_are_not_collapsed():
+    rows = [entry("AAA", RUN, {"src": 1}), entry("BBB", RUN, {"src": 1})]
+    assert A.score_entries(rows, fixed(6.0), RUN).scores["src"].samples == 2
+
+
 def test_entries_outside_the_window_are_ignored():
     old = RUN - timedelta(days=A.WINDOW_DAYS + 5)
     report = A.score_entries([entry("AAA", old, {"src": 1})], fixed(6.0), RUN)

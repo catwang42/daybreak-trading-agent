@@ -144,6 +144,27 @@ def outcome_direction(return_pct: float | None) -> int | None:
     return 1 if return_pct > 0 else -1
 
 
+def _latest_per_decision(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per (date, ticker, stage), keeping the last one written.
+
+    The journal is append-only and re-running a session is supported (``--date``
+    exists precisely for that), so the same decision can appear several times.
+    Each copy is the same call about the same day, and counting them as separate
+    samples would let a source quadruple its evidence by being re-run — inflating
+    a lucky streak into a "proven" record and, through the shrinkage term, an
+    unearned weight. The last write wins because it reflects the newest belief.
+    """
+    latest: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for entry in entries:
+        key = (
+            str(entry.get("date")),
+            str(entry.get("ticker")),
+            str(entry.get("stage", "")),
+        )
+        latest[key] = entry
+    return list(latest.values())
+
+
 def score_entries(
     entries: Iterable[dict[str, Any]],
     realised: Callable[[str, date], float | None],
@@ -158,7 +179,7 @@ def score_entries(
     """
     report = AccuracyReport(scored_on=run_date, window_days=window_days)
     cutoff = run_date - timedelta(days=window_days)
-    for entry in entries:
+    for entry in _latest_per_decision(entries):
         readings = entry.get("signal_readings") or {}
         if not readings:
             continue
