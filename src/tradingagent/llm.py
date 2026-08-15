@@ -333,6 +333,15 @@ _LIST_ITEM_CHARS = 250
 # that hits the ceiling costs a truncated reply and a `json_invalid` guess.
 _BUDGET_HEADROOM = 1.6
 _BUDGET_FLOOR = 600
+# A reasoning model spends tokens before it writes the answer, and the provider
+# charges that thinking against the same `max_tokens` ceiling. Measured on the
+# options strategist against Sonnet-class on Vertex: the same prompt returned
+# `finish_reason=length` with **no content at all** at a 1,907-token ceiling and
+# completed in 3,057 tokens at 4,000 — roughly 2,400 tokens of thinking before
+# the first brace. A ceiling sized to the JSON alone therefore buys a silent
+# empty reply, which is the most expensive failure available: a wasted call, a
+# re-prompt, and often a DEGRADED ticker. Unused ceiling is not billed.
+_REASONING_ALLOWANCE = 2500
 
 
 def _max_length(info: Any) -> int | None:
@@ -343,10 +352,11 @@ def token_budget(schema: type[BaseModel]) -> int:
     """Completion tokens enough to hold a maximal valid instance of ``schema``.
 
     Every string field is assumed to run to its cap, every list to its item
-    limit, plus the JSON scaffolding. The estimate errs high on purpose:
-    unused budget is not billed — providers charge generated tokens — so the
-    only cost of a generous ceiling is that a runaway reply runs longer before
-    it is cut off.
+    limit, plus the JSON scaffolding and :data:`_REASONING_ALLOWANCE` for the
+    thinking the model does before the first brace. The estimate errs high on
+    purpose: unused budget is not billed — providers charge generated tokens —
+    so the only cost of a generous ceiling is that a runaway reply runs longer
+    before it is cut off.
     """
     chars = 0
     for name, info in schema.model_fields.items():
@@ -358,7 +368,8 @@ def token_budget(schema: type[BaseModel]) -> int:
             chars += _max_length(info) or _UNCAPPED_STR_CHARS
         else:
             chars += 24  # numbers, enums, short literals
-    return max(_BUDGET_FLOOR, int(chars / _CHARS_PER_TOKEN * _BUDGET_HEADROOM))
+    prose = max(_BUDGET_FLOOR, int(chars / _CHARS_PER_TOKEN * _BUDGET_HEADROOM))
+    return prose + _REASONING_ALLOWANCE
 
 
 def _violation_digest(error: Exception) -> str:

@@ -198,6 +198,12 @@ def _echo_options(settings, options) -> None:
                 f"{abs(chosen.delta):.2f} · ${chosen.credit:.2f} · "
                 f"{chosen.annualized_yield_pct:.1f}% ann."
             )
+        elif plan.candidates:
+            # Distinguishing these matters: an empty screen is a data or
+            # liquidity story, a declined screen is the strategist's judgement.
+            detail = plan.error or (
+                f"strategist declined all {len(plan.candidates)} screened candidate(s)"
+            )
         else:
             detail = plan.skipped or plan.error or "no candidate passed the screen"
         strategy = {"cash-secured put": "CSP", "covered call": "CC"}.get(plan.strategy or "", "—")

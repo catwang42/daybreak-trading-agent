@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from tradingagent.discovery.shortlist import QuickTake
 from tradingagent.llm import (
     _CHARS_PER_TOKEN,
+    _REASONING_ALLOWANCE,
     EmptyCompletion,
     LLMError,
     LLMGateway,
@@ -170,9 +171,11 @@ def test_token_budget_covers_a_maximal_valid_instance(schema):
     payload = _maximal(schema)
     schema.model_validate(payload)  # the longest reply is a legal reply
     longest = len(json.dumps(payload))
-    assert token_budget(schema) * _CHARS_PER_TOKEN >= longest, (
-        f"{schema.__name__}: budget holds "
-        f"{int(token_budget(schema) * _CHARS_PER_TOKEN)} chars, maximal reply is {longest}"
+    # The reasoning allowance is for thinking, not prose — the prose share alone
+    # has to hold the reply, or the allowance is quietly covering a cap overrun.
+    prose = (token_budget(schema) - _REASONING_ALLOWANCE) * _CHARS_PER_TOKEN
+    assert prose >= longest, (
+        f"{schema.__name__}: budget holds {int(prose)} chars, maximal reply is {longest}"
     )
 
 
@@ -186,7 +189,19 @@ def test_token_budget_tracks_a_cap_change():
         text: str = Field(max_length=8000)
 
     assert token_budget(Wide) > token_budget(Narrow)
-    assert token_budget(Narrow) == 600  # floor: schemas this small still need room
+    # floor: schemas this small still need room, plus the thinking allowance
+    assert token_budget(Narrow) == 600 + _REASONING_ALLOWANCE
+
+
+def test_every_budget_leaves_room_to_think_before_the_first_brace():
+    """A ceiling sized to the JSON alone returns an empty reply, not a short one.
+
+    Measured against Sonnet-class on Vertex: the options strategist spent ~2,400
+    tokens reasoning before it wrote a brace, and at a JSON-sized ceiling the
+    provider returned `finish_reason=length` with no content at all.
+    """
+    for schema in ROLE_SCHEMAS:
+        assert token_budget(schema) >= _REASONING_ALLOWANCE + 600
 
 
 def test_schema_call_defaults_its_budget_from_the_schema():
