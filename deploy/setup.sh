@@ -10,7 +10,32 @@ set -euo pipefail
 # --- Load config/.env ---------------------------------------------------------
 ENV_FILE="$(dirname "$0")/../config/.env"
 [ -f "$ENV_FILE" ] || { echo "ERROR: $ENV_FILE not found. Copy config/.env.example and fill it."; exit 1; }
-set -a; source "$ENV_FILE"; set +a
+
+# `source` is not a dotenv parser, and the difference is not academic:
+# `KEY= value` assigns nothing and then runs `value` as a command, and
+# `SEC_USER_AGENT=daybreak-research you@example.com` assigns the first word and
+# runs the address as a command. Under `set -e` both abort this script; without
+# it they would push a truncated secret and quietly disable a data source in
+# cloud while everything still worked locally, because python-dotenv is lenient
+# about exactly these two shapes. Parse it ourselves, applying the same
+# inline-comment rule as config.py::_clean() so bash and the app agree on every
+# value.
+load_env () {
+  local LINE KEY VAL
+  while IFS= read -r LINE || [ -n "$LINE" ]; do
+    LINE="${LINE#"${LINE%%[![:space:]]*}"}"
+    case "$LINE" in ''|'#'*) continue ;; esac
+    [ "${LINE#*=}" != "$LINE" ] || continue
+    KEY="${LINE%%=*}"; VAL="${LINE#*=}"
+    KEY="${KEY%"${KEY##*[![:space:]]}"}"
+    case "$KEY" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+    VAL="$(printf '%s' "$VAL" | sed -E 's/(^|[[:space:]])#.*$//')"
+    VAL="${VAL#"${VAL%%[![:space:]]*}"}"; VAL="${VAL%"${VAL##*[![:space:]]}"}"
+    case "$VAL" in \"*\") VAL="${VAL#\"}"; VAL="${VAL%\"}" ;; \'*\') VAL="${VAL#\'}"; VAL="${VAL%\'}" ;; esac
+    export "$KEY=$VAL"
+  done < "$1"
+}
+load_env "$ENV_FILE"
 
 # --- Validate required values -------------------------------------------------
 for VAR in VERTEXAI_PROJECT VERTEXAI_LOCATION LLM_FAST_MODEL LLM_SMART_MODEL LLM_DEEP_MODEL \
@@ -18,6 +43,15 @@ for VAR in VERTEXAI_PROJECT VERTEXAI_LOCATION LLM_FAST_MODEL LLM_SMART_MODEL LLM
   [ -n "${!VAR:-}" ] || { echo "ERROR: $VAR is empty in config/.env"; exit 1; }
 done
 [ "${ALPACA_PAPER:-}" = "true" ] || { echo "ERROR: ALPACA_PAPER must be true (research guardrail)"; exit 1; }
+# EDGAR's fair-access rules require a real contact address; signals/insider.py
+# skips the source outright without one. A truncated value is the likely cause,
+# so fail here rather than ship a permanently degraded Form 4 signal.
+case "${SEC_USER_AGENT:-}" in
+  "") echo "WARNING: SEC_USER_AGENT unset — the SEC Form 4 signal will skip itself." ;;
+  *@*.*) ;;
+  *) echo "ERROR: SEC_USER_AGENT has no contact address; EDGAR will refuse us. Expected 'name you@example.com'."; exit 1 ;;
+esac
+[ -n "${FRED_API_KEY:-}" ] || echo "WARNING: FRED_API_KEY unset — the macro-regime signal will skip itself."
 # Delivery is optional by design — the app reports it as skipped and still writes
 # the reports. Warn rather than fail, because a scheduled job nobody reads is a
 # quieter failure than a setup script that stops.
