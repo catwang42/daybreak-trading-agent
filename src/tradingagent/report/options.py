@@ -96,6 +96,7 @@ def _candidate_block(c: OptionCandidate, chosen: bool) -> str:
             f"  - Open interest {oi}, spread {spread}, priced off the {q.price_basis} "
             f"({q.freshness()})",
             f"  - Earnings before expiry: {c.earnings_flag}",
+            *[f"  - ⚠ **Disagrees with the equity plan:** {row}" for row in c.conflicts],
         ]
     )
 

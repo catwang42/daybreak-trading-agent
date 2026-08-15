@@ -19,6 +19,12 @@ from tradingagent.options.context import (
     build_options_context,
     levels_from,
 )
+from tradingagent.options.levels import (
+    RESISTANCE,
+    SUPPORT,
+    TARGET,
+    chart_levels,
+)
 
 
 class FakeIndicators:
@@ -76,17 +82,27 @@ def test_levels_are_pulled_from_the_indicators_the_deep_roles_argued_over():
         evidence=FakeEvidence(indicators),
         screener={"stop_ref": 90.5, "entry_ref": 101.2},
     )
-    levels = levels_from(result)
-    assert levels["50-day SMA"] == 96.0
-    assert levels["Bollinger upper band"] == 106.0
-    assert levels["2-ATR band"] == pytest.approx(95.0)
-    assert levels["screener stop reference"] == 90.5
-    assert levels["portfolio manager price target"] == 112.0
+    levels = {lv.label: lv for lv in levels_from(result)}
+    assert levels["50-day SMA"].value == 96.0
+    assert levels["Bollinger upper band"].value == 106.0
+    assert levels["2-ATR band"].value == pytest.approx(95.0)
+    assert levels["screener stop reference"].value == 90.5
+    assert levels["portfolio manager price target"].value == 112.0
+
+    # Roles, not just numbers: what a strike may be anchored to, and what only
+    # constrains one.
+    assert levels["50-day SMA"].role == SUPPORT
+    assert levels["Bollinger upper band"].role == RESISTANCE
+    assert levels["portfolio manager price target"].role == TARGET
+    assert chart_levels(levels_from(result)).keys() == {
+        "50-day SMA", "200-day SMA", "Bollinger lower band", "Bollinger upper band",
+        "2-ATR band", "screener stop reference", "screener entry reference",
+    }
 
 
 def test_levels_skip_indicators_that_are_absent_rather_than_writing_zero():
     result = FakeResult(evidence=FakeEvidence(FakeIndicators({"close_50_sma": None, "atr": 0})))
-    levels = levels_from(result)
+    levels = {lv.label for lv in levels_from(result)}
     assert "50-day SMA" not in levels
     assert "2-ATR band" not in levels
 
@@ -95,7 +111,7 @@ def test_a_screener_field_that_is_not_a_number_is_dropped_quietly():
     result = FakeResult(
         evidence=FakeEvidence(FakeIndicators({})), screener={"stop_ref": "n/a", "entry_ref": 0}
     )
-    assert levels_from(result) == {}
+    assert levels_from(result) == []
 
 
 def test_a_degraded_deep_dive_is_carried_not_dropped():
@@ -123,7 +139,7 @@ def test_the_context_round_trips_through_json():
     row = restored.verdicts[0]
     assert isinstance(row, VerdictRow)
     assert (row.rating, row.price_target, row.dividend_yield_pct) == ("Overweight", 112.0, 3.1)
-    assert row.levels["50-day SMA"] == 96.0
+    assert {lv.label: lv.value for lv in row.price_levels()}["50-day SMA"] == 96.0
 
 
 def test_a_stale_schema_version_is_refused_rather_than_read_thin():

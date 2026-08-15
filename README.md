@@ -268,6 +268,37 @@ the contracts endpoint and settles a day behind. Run outside market hours and th
 premiums are the previous session's marks — the report says which timestamp produced
 each number and how old it is.
 
+### Which levels a strike may sit on
+
+The options stage used to receive a bag of labelled numbers — `{"50-day SMA": 31.84,
+"screener stop reference": 31.58, "price target": 36.00}` — and treat every one of them as
+a possible strike anchor. Nothing in the bag could act as a *constraint*, so the overlay
+could not disagree with the equity plan even when it did. Each level now carries a role
+(`src/tradingagent/options/levels.py`) and the role decides what it may do:
+
+| Role | Where it comes from | What it may do |
+|---|---|---|
+| `SUPPORT` / `RESISTANCE` | chart levels the analysts argued over | anchor a strike |
+| `ENTRY` / `INVALIDATION` / `TARGET` | the computed `TradePlan` | constrain a strike, never anchor one |
+
+Two consistency rules follow, checked in code after the hard filters:
+
+- **A put must be assigned into a live setup.** If the assignment breakeven (strike −
+  credit) sits at or below the equity plan's invalidation, the put can only fill after the
+  plan has already stopped out, so it buys a setup that has failed. Rejected, unless the
+  caller asks for an acquire-after-setup-failure trade — then it is kept and *labelled*
+  that, never presented as an entry. KMI shipped a recommended put whose breakeven was
+  $31.58 against a $31.58 stop reference: the same number, invisible because one was a
+  label and the other was arithmetic on a strike. The same report's prose rejected a
+  different strike for exactly this reason, which is the rule the code now enforces.
+- **A call must not cap the position under the thesis.** A covered-call strike below the
+  base-case `TARGET` sells the upside the equity argument is built on. The candidate is
+  kept, its score cut, and the conflict printed under the recommendation as
+  **⚠ Disagrees with the equity plan**.
+
+If every candidate conflicts, the screen returns nothing and the rejection tally says why
+— a setup too tight to sell puts against is a finding, not silence.
+
 ### Delivery
 
 The run ends by emailing the brief over SMTP (`src/tradingagent/delivery/email.py`).

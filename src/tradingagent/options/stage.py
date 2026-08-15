@@ -141,7 +141,7 @@ def build_plan(
         chain,
         strategy=strategy,
         spot=row.spot,
-        levels=row.levels,
+        levels=row.price_levels(),
         risk_free_rate=settings.risk_free_rate,
         as_of=run_date,
         dividend_yield=_dividend_q(row),
