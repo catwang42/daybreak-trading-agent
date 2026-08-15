@@ -13,6 +13,8 @@ from ..pipeline.analysts import stance_spread
 from ..pipeline.deep import DeepResult
 from .render import DISCLAIMER
 
+OPTIONS_HEADING = "## 6. Options View"
+
 
 def _verdict(result: DeepResult) -> str:
     lines = ["## 1. Verdict", ""]
@@ -177,12 +179,23 @@ def _risk(result: DeepResult) -> str:
     return "\n".join(lines)
 
 
-def _options() -> str:
-    return (
-        "## 6. Options View\n\n"
-        "_Not yet implemented — Milestone 4 adds cash-secured put and covered-call "
-        "candidates from Alpaca paper option chains._\n"
-    )
+def _options(plan=None) -> str:
+    """Section 6.
+
+    The deep stage renders this as a placeholder and the options stage patches
+    it in place afterwards (:func:`tradingagent.report.writer.replace_section`),
+    because the overlay needs the verdict this very report contains. ``--stage
+    all`` passes the finished plan straight through and skips the round trip.
+    """
+    if plan is None:
+        return (
+            f"{OPTIONS_HEADING}\n\n"
+            "_Pending — run `--stage options` for this date to add cash-secured put "
+            "and covered-call candidates from the Alpaca paper option chain._\n"
+        )
+    from .options import render_options_section
+
+    return f"{OPTIONS_HEADING}\n\n{render_options_section(plan)}\n"
 
 
 def _sources(result: DeepResult) -> str:
@@ -256,7 +269,9 @@ def render_deep_index(results: list[DeepResult]) -> str:
     return "\n".join(lines)
 
 
-def render_deep_report(result: DeepResult, brief_path: str = "../daily-brief.md") -> str:
+def render_deep_report(
+    result: DeepResult, brief_path: str = "../daily-brief.md", options_plan=None
+) -> str:
     q = result.queued
     header = (
         f"# {q.symbol} — {q.name or q.symbol}\n\n"
@@ -272,7 +287,7 @@ def render_deep_report(result: DeepResult, brief_path: str = "../daily-brief.md"
             _debate(result),
             _proposal(result),
             _risk(result),
-            _options(),
+            _options(options_plan),
             _sources(result),
             _footer(result, brief_path),
         ]

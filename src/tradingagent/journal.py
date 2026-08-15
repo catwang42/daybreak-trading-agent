@@ -151,6 +151,50 @@ def entries_from_deep(results, run_date: date, report_dir: str = ""):
     return out
 
 
+OPTIONS_SIGNAL_SOURCES = [
+    "alpaca:option-chain",
+    "alpaca:option-contracts",
+    "finnhub:earnings-calendar",
+    "options:black-scholes",
+    "options:staskh-screen",
+]
+
+
+def entries_from_options(plans, run_date: date, report_dir: str = ""):
+    """One line per ticker the options stage looked at.
+
+    The ``options`` field carries the recommended contract's full basis — every
+    input that produced the premium and the delta, plus the alternatives it beat
+    (see :meth:`~tradingagent.options.strategist.OptionsPlan.journal_payload`).
+    Tickers that got no overlay are written too, with the reason: a verdict the
+    options stage declined is a decision, and the journal records decisions.
+
+    ``verdict`` repeats the equity rating rather than the option, so these lines
+    grade against the same realised move as the deep lines that produced them.
+    """
+    prefix = report_dir or f"reports/{run_date.isoformat()}/deep"
+    out: list[JournalEntry] = []
+    for plan in plans:
+        payload = plan.journal_payload()
+        if payload is None:
+            continue
+        chosen = payload.get("recommended") if isinstance(payload, dict) else None
+        out.append(
+            JournalEntry(
+                date=run_date.isoformat(),
+                ticker=plan.symbol,
+                verdict=plan.strategy or "no overlay",
+                confidence=(plan.recommendation.conviction if plan.recommendation else ""),
+                report=f"{prefix}/{plan.symbol}.md",
+                target=chosen.get("strike") if isinstance(chosen, dict) else None,
+                options=payload,
+                signal_sources=list(OPTIONS_SIGNAL_SOURCES),
+                stage="options",
+            )
+        )
+    return out
+
+
 def read_entries(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
