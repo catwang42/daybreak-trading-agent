@@ -1,0 +1,27 @@
+# What `gcloud builds submit` uploads. Without this file gcloud falls back to
+# .gitignore, which does not exclude reference/ — 78 MB of read-only cookbook
+# repos that CLAUDE.md forbids importing, re-uploaded on every deploy.
+#
+# NOTE: the presence of this file disables the .gitignore fallback entirely, so
+# config/.env must be listed here explicitly. It is the one entry that is a
+# security matter rather than a speed one: it must never reach the Cloud Build
+# staging bucket.
+config/.env
+config/.env.bak*
+
+# Third-party cookbooks — read-only references, never built or shipped.
+reference/
+
+# Local outputs (also excluded from the image by .dockerignore).
+reports/
+journal/
+
+# Local tooling and env.
+.venv/
+venv/
+.git/
+.gitignore
+.claude/
+__pycache__/
+*.pyc
+.pytest_cache/

@@ -82,11 +82,45 @@ gcloud artifacts repositories create "$REPO" --repository-format=docker --locati
 gcloud storage buckets create "$BUCKET" --location="$REGION" || true
 gcloud iam service-accounts create "$SA_NAME" --display-name="trading agent job" || true
 
+# A freshly created service account is not immediately visible to the IAM APIs:
+# the very next add-iam-policy-binding fails with "does not exist" until the
+# identity has propagated. Wait for it rather than making the operator re-run
+# the script and wonder which half applied.
+echo "Waiting for ${SA} to propagate..."
+for _ in $(seq 1 30); do
+  gcloud iam service-accounts describe "$SA" >/dev/null 2>&1 && break
+  sleep 2
+done
+gcloud iam service-accounts describe "$SA" >/dev/null 2>&1 \
+  || { echo "ERROR: ${SA} still not visible after 60s."; exit 1; }
+
+# Propagation to the *policy* backends lags visibility, so bindings still race.
+# Only retry the propagation class: a deterministic error retried ten times just
+# buries the real message under ten copies of itself.
+retry () {
+  local N=0 OUT
+  while :; do
+    if OUT="$("$@" 2>&1)"; then printf '%s\n' "$OUT"; return 0; fi
+    case "$OUT" in
+      *"does not exist"*|*NOT_FOUND*|*"not found"*|*"Internal error"*|*503*|*"try again"*) ;;
+      *) printf '%s\n' "$OUT" >&2; return 1 ;;
+    esac
+    N=$((N + 1))
+    [ "$N" -lt 10 ] || { printf '%s\n' "$OUT" >&2; echo "ERROR: gave up after $N attempts: $*" >&2; return 1; }
+    echo "  waiting for IAM propagation, retry $N/10..."
+    sleep 5
+  done
+}
+
 # --- Permissions: GCS (reports/journal) + Vertex (invoke Claude) ---------------
-gcloud storage buckets add-iam-policy-binding "$BUCKET" \
+retry gcloud storage buckets add-iam-policy-binding "$BUCKET" \
   --member="serviceAccount:${SA}" --role=roles/storage.objectAdmin
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${SA}" --role=roles/aiplatform.user
+# --condition=None is required, not cosmetic: on a shared project whose IAM
+# policy already contains conditional bindings (someone else's), gcloud refuses
+# to add an unconditional one in non-interactive mode unless you say so. This
+# appends a binding for our SA only; nothing existing is touched.
+retry gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SA}" --role=roles/aiplatform.user --condition=None
 
 # --- Secrets: pushed from config/.env values; empty ones skipped ---------------
 push_secret () {
@@ -94,7 +128,7 @@ push_secret () {
   [ -n "$VALUE" ] || { echo "skip secret $NAME (empty)"; return 0; }
   printf "%s" "$VALUE" | gcloud secrets create "$NAME" --data-file=- 2>/dev/null \
     || printf "%s" "$VALUE" | gcloud secrets versions add "$NAME" --data-file=-
-  gcloud secrets add-iam-policy-binding "$NAME" \
+  retry gcloud secrets add-iam-policy-binding "$NAME" \
     --member="serviceAccount:${SA}" --role=roles/secretmanager.secretAccessor
 }
 # Every name here is optional — push_secret skips the empty ones and the app
@@ -140,7 +174,7 @@ gcloud run jobs deploy "$JOB" --image "$IMAGE" --region "$REGION" \
 # --- Scheduler trigger ---------------------------------------------------------
 # The scheduler authenticates as the same SA, so it needs permission to invoke
 # the job it triggers. Without this the cron fires and gets a silent 403.
-gcloud run jobs add-iam-policy-binding "$JOB" --region "$REGION" \
+retry gcloud run jobs add-iam-policy-binding "$JOB" --region "$REGION" \
   --member="serviceAccount:${SA}" --role=roles/run.invoker
 
 TRIGGER_URI="https://run.googleapis.com/v2/projects/${PROJECT_ID}/locations/${REGION}/jobs/${JOB}:run"
