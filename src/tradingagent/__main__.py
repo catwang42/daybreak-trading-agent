@@ -79,7 +79,18 @@ def main(
     only = [t.strip().upper() for t in tickers.split(",") if t.strip()] if tickers else None
     log.info("Stage=%s date=%s paper=%s", stage.value, settings.run_date, settings.alpaca_paper)
 
+    from .delivery.email import DeliveryError
+    from .delivery.stage import run_report, verdicts_from_results
     from .stages import run_all, run_deep, run_discovery, run_options
+
+    if stage is Stage.report:
+        # Re-delivery only: no market data, no LLM calls, no journal writes.
+        try:
+            _echo_delivery(run_report(settings))
+        except DeliveryError as exc:
+            typer.secho(f"Delivery failed: {exc}", fg="red", err=True)
+            raise typer.Exit(1)
+        return
 
     if stage is Stage.options:
         if skip_llm:
@@ -123,6 +134,22 @@ def main(
         _echo_discovery(settings, discovery)
         _echo_deep(settings, deep)
         _echo_options(settings, options)
+
+        # Delivery is last, after every artefact is on disk and in GCS, so a
+        # send failure costs the email and not the run. It still exits non-zero:
+        # in Cloud Run a silent non-delivery is indistinguishable from a job
+        # that never fired, and that is the failure mode worth being loud about.
+        try:
+            _echo_delivery(
+                run_report(
+                    settings,
+                    verdicts=verdicts_from_results(deep.results),
+                    degraded=discovery.context.degraded,
+                )
+            )
+        except DeliveryError as exc:
+            typer.secho(f"Delivery failed (reports are written): {exc}", fg="red", err=True)
+            raise typer.Exit(1)
         return
 
     result = run_discovery(
@@ -218,6 +245,19 @@ def _echo_options(settings, options) -> None:
     )
     if options.degraded.entries:
         typer.secho(f"DEGRADED: {', '.join(options.degraded.sources)}", fg="yellow")
+
+
+def _echo_delivery(result) -> None:
+    typer.echo("")
+    if not result.sent:
+        typer.secho(f"Email:    skipped ({result.skipped})", fg="yellow")
+        typer.echo(f"  would have sent: {result.subject}")
+        return
+    typer.secho(f"Email:    sent to {', '.join(result.recipients)}", fg="green")
+    typer.echo(f"  subject: {result.subject}")
+    typer.echo(f"  attached: {', '.join(result.attachments) or 'nothing'}")
+    if result.dropped:
+        typer.secho(f"  DROPPED: {', '.join(result.dropped)}", fg="yellow")
 
 
 if __name__ == "__main__":

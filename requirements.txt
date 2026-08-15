@@ -16,6 +16,12 @@ feedparser==6.0.14
 requests==2.34.2
 lxml==6.1.1          # pandas.read_html backend for universe.fetch_live()
 
+# --- Delivery ---
+# Markdown -> HTML for the daily email. Already present transitively (litellm
+# pulls it via rich); pinned explicitly because delivery/email.py imports it
+# directly and a transitive dependency is not a promise.
+markdown-it-py==4.2.0
+
 # --- Core ---
 pandas==3.0.5
 numpy==2.4.6
