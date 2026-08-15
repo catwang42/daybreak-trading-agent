@@ -19,7 +19,7 @@ from .config import Settings
 from .data.alpaca_client import AlpacaPaper
 from .data.finnhub_client import FinnhubFree
 from .data.market import MarketData, Quote
-from .data.universe import Constituent, load_universe, normalize_sector
+from .data.universe import Constituent, load_universe_versioned, normalize_sector
 from .data.validate import DegradedTracker
 from .discovery.breadth import BreadthResult, analyze_breadth
 from .discovery.calendar import CalendarView, build_calendar
@@ -64,6 +64,7 @@ from .report.render import (
 from .report.writer import replace_section, write_report
 from .signals import SignalHub, build_default_hub
 from .signals.accuracy import AccuracyReport, AccuracyTracker, realised_return
+from .snapshot import ResearchSnapshot
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +79,8 @@ class DiscoveryResult:
     report_path: str
     journal_written: int
     deep_context: DeepContext | None = None
+    #: The run's one market picture, handed to the later stages in memory.
+    snapshot: ResearchSnapshot | None = None
 
 
 def build_signal_hub(
@@ -105,6 +108,33 @@ def build_signal_hub(
     return hub, report
 
 
+def _load_snapshot(
+    report_dir, context: DeepContext, degraded: DegradedTracker
+) -> ResearchSnapshot | None:
+    """Read the discovery snapshot for a standalone stage run.
+
+    Returns None rather than raising: a missing snapshot degrades this run to
+    the pre-M6 behaviour of fetching its own bars, which is worse but is still
+    an analysis. What it must not do is happen silently — hence the degraded
+    entry, which lands in section 7 of the brief.
+    """
+    try:
+        snapshot = ResearchSnapshot.read(report_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        degraded.add(
+            "Research snapshot",
+            f"{exc} — this stage will download its own bars, which may not match the brief",
+        )
+        return None
+    if context.snapshot_id and snapshot.snapshot_id != context.snapshot_id:
+        degraded.add(
+            "Research snapshot",
+            f"the queue was built against {context.snapshot_id} but {snapshot.snapshot_id} "
+            "is on disk; the newer one is in use and prices may differ from the brief",
+        )
+    return snapshot
+
+
 @dataclass
 class DeepStageResult:
     results: list[DeepResult] = field(default_factory=list)
@@ -115,6 +145,40 @@ class DeepStageResult:
     degraded: DegradedTracker = field(default_factory=DegradedTracker)
     ledger: TokenLedger | None = None
     options_context: OptionsContext | None = None
+
+
+def _quote_snapshot(context: OptionsContext) -> ResearchSnapshot:
+    """The overlay's own, second, named picture of the market.
+
+    Option premiums must be priced off live quotes — a strike chosen against a
+    two-day-old book is not a trade anyone could put on. That makes the overlay
+    the one stage that legitimately reads fresher data than the run's primary
+    snapshot, so it takes a named one of its own and the report prints both
+    moments. Everything anchored to the equity thesis (spot, levels, targets)
+    still comes from the primary snapshot, unchanged.
+    """
+    base = ResearchSnapshot(
+        snapshot_id=context.snapshot_id or "unknown",
+        run_date=context.date,
+        market_as_of=(
+            date.fromisoformat(context.market_as_of) if context.market_as_of else context.date
+        ),
+        observed_at=datetime.now(timezone.utc),
+        universe_version="inherited from the deep stage",
+    )
+    return base.derive("options-quotes")
+
+
+def _options_provenance(context: OptionsContext, quotes: ResearchSnapshot) -> list[str]:
+    """The two moments section 6 mixes, said out loud."""
+    equity = context.snapshot_id or "unnamed (pre-M6 context)"
+    return [
+        f"Strikes are anchored to the equity snapshot `{equity}` "
+        f"(market as of {context.market_as_of or context.run_date} close). Premiums, greeks "
+        f"and yields are priced against a second, named snapshot "
+        f"`{quotes.snapshot_id}` taken at {quotes.observed_at:%Y-%m-%d %H:%M UTC} — the "
+        "option book moves intraday and a strike priced off a stale chain is not a fill.",
+    ]
 
 
 @dataclass
@@ -223,6 +287,7 @@ def build_deep_context(
     macro_note: str,
     data_as_of: str,
     degraded: DegradedTracker,
+    snapshot: ResearchSnapshot | None = None,
 ) -> DeepContext:
     """Freeze what the deep stage needs so it never re-derives a different picture."""
     queue: list[QueuedTicker] = []
@@ -273,6 +338,8 @@ def build_deep_context(
         data_as_of=data_as_of,
         queue=queue,
         discovery_degraded=list(degraded.sources),
+        snapshot_id=snapshot.snapshot_id if snapshot else "",
+        market_as_of=snapshot.market_as_of.isoformat() if snapshot else "",
     )
 
 
@@ -291,9 +358,11 @@ def run_discovery(
     run_date = settings.run_date
 
     # --- universe + prices ------------------------------------------------
-    constituents: list[Constituent] = load_universe(refresh=refresh_universe)
+    constituents: list[Constituent]
+    constituents, universe_version = load_universe_versioned(refresh=refresh_universe)
     if universe_limit:
         constituents = constituents[:universe_limit]
+        universe_version = f"{universe_version} (first {universe_limit})"
     preferred = {normalize_sector(s) for s in prefs.target_sectors}
 
     market = MarketData(degraded=degraded, period="2y")
@@ -344,6 +413,29 @@ def run_discovery(
         or "- none scheduled"
     )
     session_note = _session_note(alpaca, run_date)
+
+    # --- freeze the picture ------------------------------------------------
+    # Everything downstream — the screen above, the deep dive, the options
+    # overlay — reads prices from here. Built after the session note so the
+    # snapshot can say which session it belongs to, and before the shortlist so
+    # nothing that reaches a report was priced off a later download.
+    snapshot = ResearchSnapshot.from_bars(
+        bars,
+        run_date,
+        session=session_note,
+        universe_version=universe_version,
+        requested=len(constituents),
+        notes=[f"{len(constituents) - len(bars)} symbol(s) had no usable history"]
+        if len(bars) < len(constituents)
+        else [],
+    )
+    log.info(
+        "Research snapshot %s — market as of %s, %d price(s), universe %s",
+        snapshot.snapshot_id,
+        snapshot.market_as_of.isoformat(),
+        len(snapshot.prices),
+        snapshot.universe_version,
+    )
 
     if indices and alpaca.enabled:
         alpaca.quote_crosscheck("SPY", next((q.price for q in indices if q.symbol == "SPY"), 0.0))
@@ -420,10 +512,7 @@ def run_discovery(
         )
 
     # --- render + persist -------------------------------------------------
-    data_as_of = "unknown"
-    if bars:
-        latest = max(frame.index[-1] for frame in bars.values())
-        data_as_of = pd.Timestamp(latest).strftime("%Y-%m-%d close")
+    data_as_of = f"{snapshot.market_as_of.isoformat()} close" if bars else "unknown"
 
     report_rel = f"reports/{run_date.isoformat()}/daily-brief.md"
     context = ReportContext(
@@ -451,6 +540,7 @@ def run_discovery(
         signal_backdrop=hub.market_block(),
         signal_accuracy=accuracy.markdown(),
         signal_shadow=hub.shadow,
+        snapshot=snapshot,
     )
     markdown = render_daily_brief(context)
     path = write_report(settings.report_dir() / "daily-brief.md", markdown, settings.reports_bucket)
@@ -467,8 +557,22 @@ def run_discovery(
         macro_note=macro_note,
         data_as_of=data_as_of,
         degraded=degraded,
+        snapshot=snapshot,
     )
     deep_context.write(settings.report_dir())
+    # Bars are persisted only for the queue: a standalone `--stage deep`
+    # tomorrow then reproduces today's numbers instead of downloading a
+    # different day's, and 500 frames of two-year history is not worth the
+    # bucket to answer a question nobody asks after the run.
+    # The queue first, then the rest of the shortlist: `--stage deep --tickers X`
+    # is the standalone case, and X is almost always a shortlisted name that
+    # the sector round-robin did not queue.
+    keep_bars = list(
+        dict.fromkeys([q.symbol for q in deep_context.queue] + [e.candidate.symbol for e in shortlist])
+    )
+    snapshot.write(
+        settings.report_dir(), keep_bars=keep_bars, bucket=settings.reports_bucket
+    )
 
     written = append_entries(
         settings.journal_path, entries_from_shortlist(shortlist, run_date, report_rel)
@@ -478,6 +582,7 @@ def run_discovery(
         report_path=str(path),
         journal_written=written,
         deep_context=deep_context,
+        snapshot=snapshot,
     )
 
 
@@ -489,22 +594,29 @@ def run_deep(
     degraded: DegradedTracker | None = None,
     ledger: TokenLedger | None = None,
     patch_brief: bool = True,
+    snapshot: ResearchSnapshot | None = None,
 ) -> DeepStageResult:
     """Run the multi-agent pipeline over the discovery queue.
 
     ``context`` is passed in memory by ``--stage all``; a standalone
     ``--stage deep`` reads the JSON discovery left behind, so the two produce
     the same analysis from the same market picture.
+
+    The snapshot follows the same route, and for a stronger reason: without it
+    this stage would download its own bars and quietly disagree with the brief
+    about what a ticker closed at. A snapshot it cannot load is a degraded run,
+    not a licence to re-fetch silently.
     """
     started = time.monotonic()
     degraded = degraded if degraded is not None else DegradedTracker()
     ledger = ledger or current_ledger()
     report_dir = settings.report_dir()
     context = context or DeepContext.read(report_dir)
+    snapshot = snapshot or _load_snapshot(report_dir, context, degraded)
 
     gateway = LLMGateway(settings, ledger)
     finnhub = FinnhubFree(settings, degraded=degraded)
-    results = run_queue(settings, context, gateway, finnhub, degraded, only=only)
+    results = run_queue(settings, context, gateway, finnhub, degraded, only=only, snapshot=snapshot)
 
     paths: list[str] = []
     for result in results:
@@ -531,7 +643,15 @@ def run_deep(
     # The options stage needs the verdicts and the levels, not the transcripts.
     # Written here so `--stage options` can run tomorrow, or on a Saturday,
     # against exactly the picture this run produced.
-    options_context = build_options_context(results, context.date, context.data_as_of)
+    options_context = build_options_context(
+        results,
+        context.date,
+        context.data_as_of,
+        snapshot_id=snapshot.snapshot_id if snapshot else context.snapshot_id,
+        market_as_of=(
+            snapshot.market_as_of.isoformat() if snapshot else context.market_as_of
+        ),
+    )
     options_context.write(report_dir)
 
     return DeepStageResult(
@@ -573,7 +693,12 @@ def run_options(
     before = {tier: TierCost(u.calls, u.prompt_tokens, u.completion_tokens, u.cost_usd)
               for tier, u in ledger.by_tier.items()}
     gateway = LLMGateway(settings, ledger)
-    plans, chains = run_plans(settings, context, gateway, degraded, only=only)
+    quote_snapshot = _quote_snapshot(context)
+    provenance = _options_provenance(context, quote_snapshot)
+    plans, chains = run_plans(
+        settings, context, gateway, degraded, only=only, provenance=provenance
+    )
+    feed_note = " ".join([*provenance, chains.feed_note]).strip()
     cost = {}
     for tier, usage in ledger.by_tier.items():
         was = before.get(tier, TierCost())
@@ -618,7 +743,7 @@ def run_options(
         patched = replace_section(
             brief_path.read_text(),
             BRIEF_OPTIONS_HEADING,
-            render_options_index(plans, chains.feed_note, note),
+            render_options_index(plans, feed_note, note),
         )
         write_report(brief_path, patched, settings.reports_bucket)
     elif patch_brief:
@@ -636,7 +761,7 @@ def run_options(
         seconds=time.monotonic() - started,
         degraded=degraded,
         ledger=ledger,
-        feed_note=chains.feed_note,
+        feed_note=feed_note,
         cost_by_tier=cost,
     )
 
@@ -664,6 +789,7 @@ def run_all(
         degraded=ctx.degraded,
         ledger=ctx.ledger,
         patch_brief=False,  # re-rendered below so the footer counts the later spend too
+        snapshot=discovery.snapshot,
     )
     options = run_options(
         settings,

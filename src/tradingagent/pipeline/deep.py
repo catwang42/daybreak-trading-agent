@@ -30,6 +30,7 @@ from ..config import Settings
 from ..data.finnhub_client import FinnhubFree
 from ..data.validate import DegradedTracker
 from ..llm import LLMGateway, TokenLedger
+from ..snapshot import ResearchSnapshot
 from .analysts import AnalystResult, run_analysts, stance_spread
 from .context import DeepContext, QueuedTicker
 from .debate import DebateResult, run_debate
@@ -217,6 +218,7 @@ def run_queue(
     finnhub: FinnhubFree,
     degraded: DegradedTracker,
     only: list[str] | None = None,
+    snapshot: ResearchSnapshot | None = None,
 ) -> list[DeepResult]:
     """Analyse the queued tickers, honouring ``DEEP_TICKER_CAP``."""
     queue = context.limit(settings.deep_ticker_cap, only=only)
@@ -231,7 +233,7 @@ def run_queue(
         settings.deep_ticker_cap,
         settings.debate_rounds,
     )
-    builder = EvidenceBuilder(context, finnhub, degraded)
+    builder = EvidenceBuilder(context, finnhub, degraded, snapshot=snapshot)
     builder.prefetch([q.symbol for q in queue])
 
     results: list[DeepResult] = []

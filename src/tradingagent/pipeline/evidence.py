@@ -32,6 +32,7 @@ from ..data.fundamentals import Fundamentals, FundamentalsClient, Positioning
 from ..data.indicators import IndicatorSet, compute_indicators
 from ..data.market import MarketData
 from ..data.validate import DegradedTracker
+from ..snapshot import Observation, ResearchSnapshot
 from .context import DeepContext, QueuedTicker
 
 log = logging.getLogger(__name__)
@@ -55,6 +56,15 @@ class Evidence:
     news: list[NewsItem] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
     source_notes: list[tuple[str, str]] = field(default_factory=list)
+    #: Which research snapshot every price figure below belongs to, and the
+    #: session it describes. Empty only if the deep stage ran without one.
+    snapshot_id: str = ""
+    market_as_of: date | None = None
+    #: The last close, with its lineage — the same object discovery ranked on.
+    price_observation: Observation | None = None
+    #: Anything that had to be fetched outside the snapshot, named so a reader
+    #: can see which figures are not covered by the run's one picture.
+    off_snapshot: list[str] = field(default_factory=list)
 
     @property
     def symbol(self) -> str:
@@ -201,9 +211,35 @@ class Evidence:
         lines.append(f"- Earnings: {self.queued.earnings_note}")
         return "\n".join(lines)
 
+    def provenance(self) -> str:
+        """One line naming the picture every price below was taken from.
+
+        Before M6 the deep stage downloaded its own bars, so a reader comparing
+        the brief with a deep report found two different closes for the same
+        ticker and no way to tell which was which. Naming the snapshot is what
+        makes that checkable rather than a matter of trust.
+        """
+        if not self.snapshot_id:
+            return (
+                "**Provenance unavailable** — this ticker was analysed without a research "
+                "snapshot, so its prices cannot be tied to the discovery run."
+            )
+        line = (
+            f"**Snapshot:** `{self.snapshot_id}` · market as of "
+            f"{self.market_as_of.isoformat() if self.market_as_of else 'unknown'} close"
+        )
+        if self.price_observation:
+            line += f" · last close {self.price_observation.cite()}"
+        if self.off_snapshot:
+            line += (
+                f"\n\n**Fetched outside the snapshot:** {', '.join(self.off_snapshot)} — "
+                "these are not covered by the closes above."
+            )
+        return line
+
     def sources(self) -> str:
         """Section 7 of the deep report: what was read, and when."""
-        rows = ["| Source | Coverage | As of |", "|---|---|---|"]
+        rows = [self.provenance(), "", "| Source | Coverage | As of |", "|---|---|---|"]
         rows += [f"| {name} | {what} | {when} |" for name, what, when in self._source_rows()]
         if self.missing:
             rows += ["", f"**Missing this run:** {', '.join(self.missing)}."]
@@ -212,9 +248,10 @@ class Evidence:
     def _source_rows(self) -> list[tuple[str, str, str]]:
         rows: list[tuple[str, str, str]] = []
         if self.indicators:
+            origin = "discovery snapshot" if self.snapshot_id else "re-downloaded by this stage"
             rows.append(
                 (
-                    "yfinance OHLCV",
+                    f"yfinance OHLCV ({origin})",
                     f"{self.indicators.sessions} daily bars, {len(self.indicators.indicators)} indicators",
                     dict(self.source_notes).get("bars", "—"),
                 )
@@ -252,7 +289,16 @@ class Evidence:
 
 
 class EvidenceBuilder:
-    """Fetches and caches everything the deep stage needs for a set of tickers."""
+    """Assembles everything the deep stage needs for a set of tickers.
+
+    Bars come from the run's :class:`~tradingagent.snapshot.ResearchSnapshot`,
+    not from a fresh download. That is the M6 fix: this class used to construct
+    its own :class:`MarketData` and re-fetch the queue minutes after discovery
+    had screened it, which is how one run reported V at 365.45 in the brief and
+    364.15 in the deep report. A symbol the snapshot does not carry is still
+    fetched — a queue entry from ``--tickers`` was never in it — but it is
+    named in the report as off-snapshot rather than blended in silently.
+    """
 
     def __init__(
         self,
@@ -261,20 +307,44 @@ class EvidenceBuilder:
         degraded: DegradedTracker,
         market: MarketData | None = None,
         fundamentals: FundamentalsClient | None = None,
+        snapshot: ResearchSnapshot | None = None,
     ):
         self.context = context
         self.finnhub = finnhub
         self.degraded = degraded
         self.market = market or MarketData(degraded=degraded, period=DEEP_HISTORY)
         self.fundamentals = fundamentals or FundamentalsClient(degraded=degraded)
+        self.snapshot = snapshot
         self._bars: dict[str, pd.DataFrame] = {}
+        #: Symbols whose bars the snapshot could not supply.
+        self._refetched: set[str] = set()
 
     def prefetch(self, symbols: list[str]) -> None:
-        """One bulk OHLCV download for the whole queue."""
+        """Take the queue's bars from the snapshot; download only what it lacks."""
         if not symbols:
             return
-        self._bars = self.market.load_many(symbols, min_rows=MIN_BARS, period=DEEP_HISTORY)
-        log.info("Deep stage: usable price history for %d/%d queued tickers", len(self._bars), len(symbols))
+        wanted = [s.upper() for s in symbols]
+        if self.snapshot is not None:
+            self._bars = {
+                s: frame
+                for s in wanted
+                if (frame := self.snapshot.frame(s)) is not None and len(frame.index) >= MIN_BARS
+            }
+            log.info(
+                "Deep stage: %d/%d queued tickers served from snapshot %s",
+                len(self._bars),
+                len(wanted),
+                self.snapshot.snapshot_id,
+            )
+        gaps = [s for s in wanted if s not in self._bars]
+        if not gaps:
+            return
+        if self.snapshot is not None:
+            log.warning("Deep stage: not in the snapshot, downloading: %s", ", ".join(gaps))
+        fetched = self.market.load_many(gaps, min_rows=MIN_BARS, period=DEEP_HISTORY)
+        self._refetched.update(fetched)
+        self._bars.update(fetched)
+        log.info("Deep stage: usable price history for %d/%d queued tickers", len(self._bars), len(wanted))
 
     def build(self, queued: QueuedTicker) -> Evidence:
         symbol = queued.symbol
@@ -283,19 +353,37 @@ class EvidenceBuilder:
             run_date=self.context.date,
             market_context=self.context.market_context,
             macro_note=self.context.macro_note,
+            snapshot_id=self.snapshot.snapshot_id if self.snapshot else self.context.snapshot_id,
+            market_as_of=self.snapshot.market_as_of if self.snapshot else None,
         )
 
         frame = self._bars.get(symbol)
         if frame is None:
+            frame = self.snapshot.frame(symbol) if self.snapshot else None
+        if frame is None:
             single = self.market.load_many([symbol], min_rows=MIN_BARS, period=DEEP_HISTORY)
             frame = single.get(symbol)
+            if frame is not None:
+                self._refetched.add(symbol)
         if frame is None:
             evidence.missing.append("price history")
             self.degraded.add(f"Deep {symbol}", "no usable OHLCV history; ticker cannot be analysed")
             return evidence
 
         evidence.indicators = compute_indicators(symbol, frame)
-        evidence.source_notes.append(("bars", pd.Timestamp(frame.index[-1]).strftime("%Y-%m-%d close")))
+        bar_date = pd.Timestamp(frame.index[-1]).date()
+        evidence.source_notes.append(("bars", f"{bar_date.isoformat()} close"))
+
+        if self.snapshot is not None:
+            # A bar dated past the snapshot's market date is a look-ahead
+            # wherever it came from: from a fresh download it is tomorrow's
+            # data in today's report, and from the snapshot file it means
+            # something merged newer bars into a frozen picture.
+            self.snapshot.check(f"{symbol} bars", bar_date)
+            if symbol in self._refetched:
+                evidence.off_snapshot.append(f"{symbol} daily bars (not in the snapshot)")
+            else:
+                evidence.price_observation = self.snapshot.price(symbol)
 
         evidence.fundamentals = self.fundamentals.fundamentals(symbol)
         if evidence.fundamentals.missing:

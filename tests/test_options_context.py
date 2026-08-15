@@ -8,6 +8,7 @@ otherwise have shipped an options stage anchored to nothing.
 
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import pytest
@@ -126,7 +127,7 @@ def test_the_context_round_trips_through_json():
 
 
 def test_a_stale_schema_version_is_refused_rather_than_read_thin():
-    payload = OptionsContext(run_date="2026-08-14").to_json().replace('"version": 1', '"version": 0')
+    payload = json.dumps({**json.loads(OptionsContext(run_date="2026-08-14").to_json()), "version": 0})
     with pytest.raises(ValueError, match="re-run the deep stage"):
         OptionsContext.from_json(payload)
 

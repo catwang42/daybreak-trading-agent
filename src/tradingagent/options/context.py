@@ -23,7 +23,9 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 CONTEXT_FILENAME = "options-context.json"
-SCHEMA_VERSION = 1
+# v2 (M6) names the research snapshot every spot and level below was taken
+# from, so the overlay can say which moment its strikes are anchored to.
+SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -56,6 +58,12 @@ class OptionsContext:
     run_date: str
     data_as_of: str = "unknown"
     verdicts: list[VerdictRow] = field(default_factory=list)
+    #: The research snapshot the spots and levels below came from. The option
+    #: chain is deliberately fresher than this — see
+    #: :meth:`tradingagent.snapshot.ResearchSnapshot.derive` — and the overlay
+    #: prints both moments rather than pretending they are one.
+    snapshot_id: str = ""
+    market_as_of: str = ""
     version: int = SCHEMA_VERSION
 
     def to_json(self) -> str:
@@ -146,7 +154,13 @@ def levels_from(result) -> dict[str, float | None]:
     return levels
 
 
-def build_options_context(results, run_date: date, data_as_of: str = "unknown") -> OptionsContext:
+def build_options_context(
+    results,
+    run_date: date,
+    data_as_of: str = "unknown",
+    snapshot_id: str = "",
+    market_as_of: str = "",
+) -> OptionsContext:
     """Freeze what the options stage needs out of a finished deep run.
 
     Tickers whose deep dive produced no verdict are carried with
@@ -178,5 +192,9 @@ def build_options_context(results, run_date: date, data_as_of: str = "unknown") 
             )
         )
     return OptionsContext(
-        run_date=run_date.isoformat(), data_as_of=data_as_of, verdicts=rows
+        run_date=run_date.isoformat(),
+        data_as_of=data_as_of,
+        verdicts=rows,
+        snapshot_id=snapshot_id,
+        market_as_of=market_as_of,
     )

@@ -87,8 +87,32 @@ once; if it fails again that ticker is marked DEGRADED and the report says which
 fell over, rather than dropping the name.
 
 Running `deep` standalone the morning after a discovery run is supported — it reuses the
-stored context instead of re-screening the universe, so it only downloads bars for the
-queued names.
+stored context instead of re-screening the universe, and reads bars from the research
+snapshot instead of downloading them again.
+
+### One snapshot per run
+
+Every run takes exactly one picture of the market and every stage reads from it:
+`reports/<date>/snapshot/snapshot.json` plus a CSV of daily bars per shortlisted name.
+It carries a `snapshot_id`, the run date, the **market date** (the last session actually
+in the data, which on a pre-market run is yesterday), the universe version the screen
+ran against, and a close per symbol with its source and effective date.
+
+This exists because the stages used to fetch their own data. Discovery screened the
+universe, then the deep stage downloaded the same tickers again minutes later, and one
+run reported V at 365.45 in the brief and 364.15 in the deep report — the trade math
+was computed against whichever number was nearest. Nothing failed; the two stages
+simply disagreed about which day it was.
+
+- The brief footer and each deep report name the snapshot every price came from.
+- A bar dated after the snapshot's market date is recorded as a **look-ahead
+  violation** and printed in the footer, so a `--date` backfill cannot quietly see
+  the future.
+- A ticker the snapshot never saw (`--stage deep --tickers ZZZ`) is still fetched, and
+  labelled `Fetched outside the snapshot` in section 7 rather than blended in.
+- The options overlay is the one stage that legitimately needs fresher data than the
+  primary snapshot — a strike priced off a stale book is not a fill. It takes a
+  **second, named** snapshot (`…-options-quotes-…`) and section 6 prints both moments.
 
 ### The options stage
 

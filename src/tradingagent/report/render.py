@@ -21,6 +21,7 @@ from ..discovery.shortlist import SIGNAL_POOL_MULTIPLE, ShortlistEntry
 from ..llm import TokenLedger
 from ..signals.accuracy import GRADUATION, MIN_OBSERVATIONS
 from ..signals.bundle import MAX_SCORE_ADJUSTMENT, ShadowRanking
+from ..snapshot import ResearchSnapshot
 
 DISCLAIMER = (
     "Automated research output for personal study. Not financial advice. "
@@ -57,6 +58,10 @@ class ReportContext:
     signal_accuracy: str = ""
     #: The shortlist the shadowed signal layer would have picked (M6 item 1).
     signal_shadow: ShadowRanking | None = None
+    #: The run's research snapshot (M6 item 2). Named in the footer so every
+    #: price in this brief, and in the deep reports it links to, can be traced
+    #: to one moment rather than to whenever each stage happened to fetch.
+    snapshot: ResearchSnapshot | None = None
     # Set once the deep stage has run in the same process (``--stage all``);
     # a standalone ``--stage deep`` patches this section on disk instead.
     deep_index: str | None = None
@@ -385,6 +390,24 @@ def _footer(ctx: ReportContext) -> str:
         f"- **Stage:** {ctx.stage} · **Runtime:** {ctx.runtime_seconds:.1f}s · "
         f"**Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
         f"- **Market data as of:** {ctx.data_as_of} · **Session:** {ctx.session_note}",
+    ]
+    if ctx.snapshot is not None:
+        snap = ctx.snapshot
+        lines.append(
+            f"- **Research snapshot:** {snap.label} · universe `{snap.universe_version}` · "
+            f"{snap.data_quality.line()}"
+        )
+        lines.append(
+            "  Every price in this brief and in the deep reports it links to comes from this "
+            "one snapshot. The options overlay prices premiums against a second, named "
+            "snapshot — section 6 says which."
+        )
+        if snap.violations:
+            lines.append(
+                f"- **Snapshot violations:** {len(snap.violations)} — "
+                + "; ".join(snap.violations[:3])
+            )
+    lines += [
         "",
         "| LLM tier | Model | Calls | Prompt tok | Completion tok | Total tok | Est. cost |",
         "|---|---|---:|---:|---:|---:|---:|",

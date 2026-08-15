@@ -273,10 +273,22 @@ def render_deep_report(
     result: DeepResult, brief_path: str = "../daily-brief.md", options_plan=None
 ) -> str:
     q = result.queued
+    evidence = result.evidence
+    # Naming the snapshot in the header, not just in section 7, is deliberate:
+    # the number a reader checks first is the one in the verdict, and they
+    # should be able to see which moment it belongs to without scrolling.
+    snapshot_line = ""
+    if evidence is not None and evidence.snapshot_id:
+        as_of = evidence.market_as_of.isoformat() if evidence.market_as_of else "unknown"
+        snapshot_line = (
+            f"Snapshot `{evidence.snapshot_id}` · every price below is the "
+            f"{as_of} close.\n\n"
+        )
     header = (
         f"# {q.symbol} — {q.name or q.symbol}\n\n"
         f"`{q.sector or 'unknown sector'} / {q.industry or 'unknown industry'}` · "
-        f"deep analysis for {result.evidence.run_date.isoformat() if result.evidence else 'n/a'}\n\n"
+        f"deep analysis for {evidence.run_date.isoformat() if evidence else 'n/a'}\n\n"
+        f"{snapshot_line}"
         "> Research only. Paper trading. The human makes every decision.\n"
     )
     return "\n".join(

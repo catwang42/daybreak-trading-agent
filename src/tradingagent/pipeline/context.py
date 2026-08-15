@@ -23,11 +23,12 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 CONTEXT_FILENAME = "discovery-context.json"
-# v2 (M3) adds the signal layer. Bumped rather than defaulted silently: a v1
-# context would parse cleanly and hand the deep stage an empty signal block,
-# which reads as "no source fired today" when the truth is "this file predates
-# the sources". Forcing a discovery re-run is the honest failure.
-SCHEMA_VERSION = 2
+# v2 (M3) adds the signal layer. v3 (M6) names the research snapshot the queue
+# was built from. Bumped rather than defaulted silently, both times: a v2
+# context would parse cleanly with an empty snapshot id, and the deep stage
+# would then go and download its own bars — which is the exact drift M6 exists
+# to remove. Forcing a discovery re-run is the honest failure.
+SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -96,6 +97,13 @@ class DeepContext:
     data_as_of: str = "unknown"
     queue: list[QueuedTicker] = field(default_factory=list)
     discovery_degraded: list[str] = field(default_factory=list)
+    #: The research snapshot discovery screened against. The deep stage reads
+    #: bars from it rather than downloading its own, and refuses to reason from
+    #: a different one — see :mod:`tradingagent.snapshot`.
+    snapshot_id: str = ""
+    #: The session those bars belong to, ISO. Repeated here so the deep stage
+    #: can state its as-of even if the snapshot file is missing.
+    market_as_of: str = ""
     version: int = SCHEMA_VERSION
 
     # -- persistence -----------------------------------------------------
