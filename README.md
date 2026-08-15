@@ -114,6 +114,27 @@ simply disagreed about which day it was.
   primary snapshot — a strike priced off a stale book is not a fill. It takes a
   **second, named** snapshot (`…-options-quotes-…`) and section 6 prints both moments.
 
+### As-of-safe retrieval
+
+Data is fetched for the snapshot's **market date**, never for "now". Company news used
+to be `company_news(symbol, days=7)` — seven days back from wall-clock now — so a
+`--date 2026-06-01` re-run read June's prices against this week's headlines, and even a
+same-day run handed the deep stage stories the shortlist had never seen. The call is now
+`company_news(symbol, start_date, end_date)`, the window comes from
+`snapshot.market_as_of`, and a headline stamped after that session's close is dropped
+even when it falls inside the requested date.
+
+- Discovery fetches each shortlisted name's headlines once and freezes them into the
+  snapshot; the deep stage reads those. An empty list means the window was quiet, which
+  is a different fact from "nobody looked" and does not trigger a second call.
+- Deep reports print the window (`2026-08-07..2026-08-14`), not "last 7 days".
+- The market-wide RSS leg takes no date parameter, so on a historical run it is skipped
+  with a DEGRADED line rather than read live.
+- Wall clock reaches the code through one function, `tradingagent.snapshot.utcnow()`,
+  and only records *when a run happened*. `tests/test_asof.py` fails the build if a new
+  `date.today()` / `datetime.now()` appears outside a small reviewed allowlist (the
+  `--date` default, the market-clock lookup, and the live options quotes).
+
 ### The options stage
 
 `deep` writes `reports/<date>/options-context.json` — each verdict plus the spot, the

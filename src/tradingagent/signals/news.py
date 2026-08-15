@@ -24,7 +24,8 @@ import re
 import time
 from datetime import date, datetime, timedelta, timezone
 
-from ..data.finnhub_client import FinnhubFree
+from ..data.finnhub_client import NEWS_WINDOW_DAYS, FinnhubFree, news_window
+from ..snapshot import utcnow
 from .base import Signal, SignalSource
 
 log = logging.getLogger(__name__)
@@ -110,13 +111,17 @@ class NewsToneSource(SignalSource):
     scope = "ticker"
     describes = "Finnhub company news + market RSS, headline lexicon tone"
 
-    def __init__(self, finnhub: FinnhubFree, degraded=None, days: int = 7, limit: int = 12,
-                 session=None):
+    def __init__(self, finnhub: FinnhubFree, degraded=None, days: int = NEWS_WINDOW_DAYS,
+                 limit: int = 12, session=None, as_of: date | None = None):
         super().__init__(degraded)
         self.finnhub = finnhub
         self.days = days
         self.limit = limit
         self._session = session
+        #: The snapshot's market date. The window ends here rather than at the
+        #: run date so a tone score is computed from the same headlines the
+        #: analysts read, and a ``--date`` re-run cannot score this week's news.
+        self.as_of = as_of
 
     def session(self):
         if self._session is None:
@@ -137,7 +142,8 @@ class NewsToneSource(SignalSource):
     def _company(self, symbol: str, run_date: date) -> list[Signal]:
         if not self.finnhub.enabled:
             return []
-        items = self.finnhub.company_news(symbol, days=self.days, limit=self.limit)
+        start, end = news_window(self.as_of or run_date, self.days)
+        items = self.finnhub.company_news(symbol, start, end, limit=self.limit)
         scored = [(item, *score_headline(item.headline)) for item in items]
         toned = [(item, tone, hits) for item, tone, hits in scored if hits]
         if not toned:
@@ -166,7 +172,21 @@ class NewsToneSource(SignalSource):
         ]
 
     def _market(self, symbols: list[str], run_date: date) -> list[Signal]:
-        """Market-wide RSS, plus any headline that names one of our tickers."""
+        """Market-wide RSS, plus any headline that names one of our tickers.
+
+        The feeds serve whatever is current and take no date parameter, so on a
+        historical run they are pure look-ahead: a ``--date 2026-06-01`` scan
+        would score June's prices against today's headlines. There is no
+        as-of-safe way to read them, so the leg is skipped and said so.
+        """
+        as_of = self.as_of or run_date
+        if as_of < utcnow().date():
+            self.degraded.add(
+                f"signals:{self.name} (market RSS)",
+                f"feeds serve current headlines only and cannot be read as of "
+                f"{as_of.isoformat()} — market tone skipped for this backfill",
+            )
+            return []
         entries = self._rss_entries()
         if not entries:
             return []

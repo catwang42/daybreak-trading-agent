@@ -64,7 +64,7 @@ from .report.render import (
 from .report.writer import replace_section, write_report
 from .signals import SignalHub, build_default_hub
 from .signals.accuracy import AccuracyReport, AccuracyTracker, realised_return
-from .snapshot import ResearchSnapshot
+from .snapshot import ResearchSnapshot, utcnow
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +88,7 @@ def build_signal_hub(
     finnhub: FinnhubFree,
     degraded: DegradedTracker,
     market: MarketData,
+    as_of: date | None = None,
 ) -> tuple[SignalHub, AccuracyReport]:
     """The four M3 sources, weighted by their record in the journal.
 
@@ -99,7 +100,7 @@ def build_signal_hub(
     tracker = AccuracyTracker(settings.journal_path)
     report = tracker.current(settings.run_date, realised=realised_return(market))
     hub = build_default_hub(
-        finnhub, degraded=degraded, weights=report.weights(), caps=report.caps()
+        finnhub, degraded=degraded, weights=report.weights(), caps=report.caps(), as_of=as_of
     )
     log.info(
         "Signal sources with earned ranking influence: %s",
@@ -163,7 +164,7 @@ def _quote_snapshot(context: OptionsContext) -> ResearchSnapshot:
         market_as_of=(
             date.fromisoformat(context.market_as_of) if context.market_as_of else context.date
         ),
-        observed_at=datetime.now(timezone.utc),
+        observed_at=utcnow(),
         universe_version="inherited from the deep stage",
     )
     return base.derive("options-quotes")
@@ -451,7 +452,9 @@ def run_discovery(
         len(eligible),
         len(candidates),
     )
-    hub, accuracy = build_signal_hub(settings, finnhub, degraded, market)
+    hub, accuracy = build_signal_hub(
+        settings, finnhub, degraded, market, as_of=snapshot.market_as_of
+    )
 
     shortlist: list[ShortlistEntry] = []
     commentary = "_LLM disabled for this run (--skip-llm)._"
@@ -467,7 +470,7 @@ def run_discovery(
         gateway = LLMGateway(settings, ledger)
         shortlist = build_shortlist(
             eligible, breadth, sector_map, calendar_view, finnhub, gateway, run_date, degraded,
-            size=size, hub=hub,
+            size=size, hub=hub, snapshot=snapshot,
         )
         commentary = market_commentary(
             gateway,
@@ -736,7 +739,7 @@ def run_options(
         spend = sum(c.cost_usd for c in cost.values())
         note = (
             f"Overlay patched in by `--stage options` on "
-            f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC} · {calls} "
+            f"{utcnow():%Y-%m-%d %H:%M UTC} · {calls} "
             f"{', '.join(cost) or 'no'}-tier call(s) · {tokens:,} tok · est. ${spend:.4f}, "
             "over and above the footer total below."
         )

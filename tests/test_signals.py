@@ -102,7 +102,7 @@ def test_synonym_stuffing_does_not_beat_a_clear_single_signal():
 class FakeFinnhub:
     enabled = False
 
-    def company_news(self, symbol, days, limit):
+    def company_news(self, symbol, start_date, end_date, limit=5):
         return []
 
 

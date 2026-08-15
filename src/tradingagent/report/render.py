@@ -21,7 +21,7 @@ from ..discovery.shortlist import SIGNAL_POOL_MULTIPLE, ShortlistEntry
 from ..llm import TokenLedger
 from ..signals.accuracy import GRADUATION, MIN_OBSERVATIONS
 from ..signals.bundle import MAX_SCORE_ADJUSTMENT, ShadowRanking
-from ..snapshot import ResearchSnapshot
+from ..snapshot import ResearchSnapshot, utcnow
 
 DISCLAIMER = (
     "Automated research output for personal study. Not financial advice. "
@@ -388,7 +388,7 @@ def _footer(ctx: ReportContext) -> str:
         "### Run footer",
         "",
         f"- **Stage:** {ctx.stage} · **Runtime:** {ctx.runtime_seconds:.1f}s · "
-        f"**Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        f"**Generated:** {utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
         f"- **Market data as of:** {ctx.data_as_of} · **Session:** {ctx.session_note}",
     ]
     if ctx.snapshot is not None:

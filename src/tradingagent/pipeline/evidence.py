@@ -27,7 +27,7 @@ from datetime import date, datetime, timezone
 
 import pandas as pd
 
-from ..data.finnhub_client import FinnhubFree, NewsItem
+from ..data.finnhub_client import FinnhubFree, NewsItem, news_window
 from ..data.fundamentals import Fundamentals, FundamentalsClient, Positioning
 from ..data.indicators import IndicatorSet, compute_indicators
 from ..data.market import MarketData
@@ -40,6 +40,8 @@ log = logging.getLogger(__name__)
 # Enough history for a 200-day SMA plus a year of context for the percentile reads.
 DEEP_HISTORY = "2y"
 MIN_BARS = 60
+#: Headlines an analyst prompt gets when this stage has to fetch its own.
+NEWS_LIMIT = 8
 
 
 @dataclass
@@ -54,6 +56,9 @@ class Evidence:
     fundamentals: Fundamentals | None = None
     positioning: Positioning | None = None
     news: list[NewsItem] = field(default_factory=list)
+    #: The window those headlines were asked for, rendered for the prompt so an
+    #: analyst reads "2026-08-07..2026-08-14", not an unfalsifiable "recent".
+    news_window_note: str = ""
     missing: list[str] = field(default_factory=list)
     source_notes: list[tuple[str, str]] = field(default_factory=list)
     #: Which research snapshot every price figure below belongs to, and the
@@ -126,7 +131,8 @@ class Evidence:
         return "\n".join(parts)
 
     def news_block(self) -> str:
-        parts = ["### Company headlines (last 7 days)", ""]
+        window = self.news_window_note or "last 7 days"
+        parts = [f"### Company headlines ({window})", ""]
         if self.news:
             for item in self.news:
                 stamp = _stamp(item.datetime_utc)
@@ -263,8 +269,8 @@ class Evidence:
         rows.append(
             (
                 "Finnhub company news",
-                f"{len(self.news)} headline(s), 7-day window",
-                self.run_date.isoformat(),
+                f"{len(self.news)} headline(s), published on or before the close",
+                dict(self.source_notes).get("news", self.news_window_note or "—"),
             )
         )
         rows.append(("Screener (this run)", "momentum-burst metrics", self.run_date.isoformat()))
@@ -390,11 +396,47 @@ class EvidenceBuilder:
             evidence.missing.append(f"fundamentals fields ({len(evidence.fundamentals.missing)})")
         evidence.positioning = self.fundamentals.positioning(symbol)
 
-        evidence.news = self.finnhub.company_news(symbol, days=7, limit=8)
+        evidence.news = self._news(symbol, evidence)
         if not evidence.news:
             evidence.missing.append("company news")
         evidence.missing.append("social/retail sentiment (not collected in this milestone)")
         return evidence
+
+    def _news(self, symbol: str, evidence: Evidence) -> list:
+        """Discovery's frozen headlines, or a window-bounded fetch if it has none.
+
+        The old call was ``company_news(symbol, days=7)``, which meant seven
+        days back from wall-clock now: a ``--date`` re-run read the right
+        prices against this week's headlines, and even a same-day run gave the
+        deep stage stories the shortlist had never seen. The window is the
+        snapshot's; anything filed after its close is dropped by the client.
+        """
+        frozen = self.snapshot.headlines(symbol) if self.snapshot else None
+        if frozen is not None:
+            window = self.snapshot.news_window
+            note = (
+                f"{window[0].isoformat()}..{window[1].isoformat()}, frozen at discovery"
+                if window
+                else "frozen at discovery"
+            )
+            evidence.news_window_note = note
+            evidence.source_notes.append(("news", note))
+            return list(frozen)
+
+        as_of = (
+            self.snapshot.market_as_of
+            if self.snapshot
+            else (evidence.market_as_of or self.context.date)
+        )
+        start, end = news_window(as_of)
+        items = self.finnhub.company_news(symbol, start, end, limit=NEWS_LIMIT)
+        evidence.news_window_note = f"{start.isoformat()}..{end.isoformat()}"
+        evidence.source_notes.append(("news", f"{start.isoformat()}..{end.isoformat()}"))
+        if self.snapshot is not None:
+            # Not in discovery's freeze — a --tickers run, or a name added
+            # after the shortlist. Fetched to the same window, but say so.
+            evidence.off_snapshot.append(f"{symbol} company news (fetched by this stage)")
+        return items
 
 
 def _lvl(value: float | None) -> str:

@@ -14,11 +14,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ..data.finnhub_client import FinnhubFree
+from ..data.finnhub_client import FinnhubFree, news_window
 from ..data.validate import DegradedTracker
 from ..llm import LLMError, LLMGateway
 from ..pipeline.prompts_loader import render
 from ..signals import SignalBundle, SignalHub
+from ..snapshot import ResearchSnapshot
 from ..signals.bundle import ShadowRanking
 from .breadth import BreadthResult
 from .calendar import CalendarView, earnings_within
@@ -29,6 +30,13 @@ log = logging.getLogger(__name__)
 
 Rating = Literal["Buy", "Overweight", "Hold", "Underweight", "Sell"]
 RATING_ORDER: dict[str, int] = {"Buy": 5, "Overweight": 4, "Hold": 3, "Underweight": 2, "Sell": 1}
+
+#: Headlines pulled per shortlisted name. Sized for the deep stage, which is
+#: the hungriest reader, so one fetch serves both stages.
+NEWS_FREEZE_LIMIT = 8
+#: How many of those the quick-take prompt sees. A FAST-tier take on a
+#: screener candidate does not improve with a longer clipping file.
+QUICK_TAKE_HEADLINES = 3
 
 
 class QuickTake(BaseModel):
@@ -315,14 +323,27 @@ def build_shortlist(
     degraded: DegradedTracker,
     size: int = 8,
     hub: SignalHub | None = None,
+    snapshot: ResearchSnapshot | None = None,
 ) -> list[ShortlistEntry]:
-    """Take the top ``size`` candidates and enrich each with a FAST quick take."""
+    """Take the top ``size`` candidates and enrich each with a FAST quick take.
+
+    News is fetched once here, for the snapshot's window, and frozen into the
+    snapshot. The deep stage then reads those same headlines instead of calling
+    Finnhub again hours later: two stages arguing about which stories exist is
+    the same defect as two stages arguing about which close is today's.
+    """
     entries: list[ShortlistEntry] = []
+    as_of = snapshot.market_as_of if snapshot else run_date
+    window = news_window(as_of)
     for candidate, bundle, screen_rank in select_with_signals(candidates, hub, run_date, size):
         earnings_note, earnings_flag = _earnings_note(calendar_view, candidate.symbol, run_date)
-        news = finnhub.company_news(candidate.symbol, days=7, limit=3)
+        news = finnhub.company_news(candidate.symbol, *window, limit=NEWS_FREEZE_LIMIT)
+        if snapshot is not None:
+            news = snapshot.freeze_news(candidate.symbol, news, window)
         news_note = (
-            " | ".join(f"{n.headline} ({n.source})" for n in news) if news else "none retrieved"
+            " | ".join(f"{n.headline} ({n.source})" for n in news[:QUICK_TAKE_HEADLINES])
+            if news
+            else "none retrieved"
         )
         prompt = quick_take_prompt(
             candidate,

@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from tradingagent.data.finnhub_client import NewsItem, news_window
 from tradingagent.data.validate import DegradedTracker
 from tradingagent.pipeline.context import DeepContext, QueuedTicker
 from tradingagent.pipeline.evidence import EvidenceBuilder
@@ -43,14 +44,20 @@ def frame(last_close=100.0, sessions=300, end="2026-08-13"):
     )
 
 
-def snapshot(bars=None, **kwargs):
-    return ResearchSnapshot.from_bars(
+def snapshot(bars=None, news=True, **kwargs):
+    snap = ResearchSnapshot.from_bars(
         bars if bars is not None else {"V": frame(365.45), "UNP": frame(297.79)},
         RUN,
         session="market CLOSED (last completed session 2026-08-13)",
         universe_version="sp500.json@2026-08-14",
         **kwargs,
     )
+    if news:
+        # Discovery froze the window for everything it priced, which is the
+        # state the deep stage actually meets.
+        for symbol in snap.prices:
+            snap.freeze_news(symbol, [], window=news_window(snap.market_as_of))
+    return snap
 
 
 # --- what a snapshot says ------------------------------------------------
@@ -195,7 +202,9 @@ class _Downloads(_RefusesToDownload):
 
 
 class _NoNews:
-    def company_news(self, symbol, days=7, limit=8):
+    def company_news(self, symbol, start_date, end_date, limit=8):
+        self.windows = getattr(self, 'windows', [])
+        self.windows.append((symbol, start_date, end_date))
         return []
 
 
@@ -275,7 +284,10 @@ def test_a_ticker_the_snapshot_never_saw_is_fetched_but_labelled_as_such():
     assert market.calls == [["ZZZ"]]
 
     evidence = builder.build(QueuedTicker(symbol="ZZZ"))
-    assert evidence.off_snapshot == ["ZZZ daily bars (not in the snapshot)"]
+    assert evidence.off_snapshot == [
+        "ZZZ daily bars (not in the snapshot)",
+        "ZZZ company news (fetched by this stage)",
+    ]
     assert evidence.price_observation is None
     assert "Fetched outside the snapshot" in evidence.provenance()
     # The one that was in the snapshot is unaffected by its neighbour.

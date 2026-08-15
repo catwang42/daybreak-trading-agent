@@ -35,11 +35,13 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 import pandas as pd
+
+from .data.finnhub_client import NewsItem
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +59,7 @@ class LookAhead(Exception):
     """Data dated after the snapshot it claims to belong to."""
 
 
-def _utcnow() -> datetime:
+def utcnow() -> datetime:
     """Wall clock, for runtime metadata only.
 
     This is the *only* sanctioned `now` in the data path, and it never decides
@@ -65,6 +67,10 @@ def _utcnow() -> datetime:
     "which day's data is this" is answered by ``market_as_of``.
     """
     return datetime.now(timezone.utc)
+
+
+#: Kept as a module-private alias so existing call sites read the same.
+_utcnow = utcnow
 
 
 def make_snapshot_id(run_date: date, name: str, observed_at: datetime) -> str:
@@ -159,6 +165,14 @@ class ResearchSnapshot:
     #: tickers are persisted, because 500 frames of two-year history is 15 MB a
     #: day in a bucket to answer a question nobody asks after the run.
     bars: dict[str, pd.DataFrame] = field(default_factory=dict, repr=False)
+    #: symbol -> the headlines discovery read, already trimmed to the window.
+    #: A missing symbol means nobody fetched news for that name; an empty list
+    #: means we looked and the window was quiet. The deep stage must be able to
+    #: tell those apart, because only the first justifies a second call.
+    news: dict[str, list[NewsItem]] = field(default_factory=dict, repr=False)
+    #: The ``(start, end)`` every frozen headline was asked for, so a report can
+    #: state the window instead of implying "recent".
+    news_window: tuple[date, date] | None = None
     data_quality: DataQuality = field(default_factory=DataQuality)
     #: Assertion failures, kept rather than raised so one contaminated ticker
     #: degrades itself instead of ending a run that has already spent tokens.
@@ -261,6 +275,52 @@ class ResearchSnapshot:
         observation = self.price(symbol)
         return observation.cite() if observation else f"no price for {symbol} in {self.snapshot_id}"
 
+    # -- news ------------------------------------------------------------
+    @property
+    def news_cutoff(self) -> int:
+        """End of the market date in UTC epoch seconds.
+
+        Prices in this snapshot are closes from ``market_as_of``; a headline
+        filed after that close is commentary on a session the snapshot has not
+        seen, and reading it alongside those prices is a look-ahead however
+        small it looks.
+        """
+        return int(datetime.combine(self.market_as_of, time.max, tzinfo=timezone.utc).timestamp())
+
+    def freeze_news(
+        self,
+        symbol: str,
+        items: Iterable[NewsItem],
+        window: tuple[date, date] | None = None,
+    ) -> list[NewsItem]:
+        """Store the headlines one fetch produced, dropping anything too new.
+
+        The provider already answered a bounded window; this is the belt to
+        that braces, because Finnhub's ``to`` is a date and a story filed at
+        20:00 UTC on the market date is inside the date and outside the close.
+        """
+        key = symbol.upper()
+        kept: list[NewsItem] = []
+        for item in items:
+            if item.datetime_utc and item.datetime_utc > self.news_cutoff:
+                self.check(f"{key} headline {item.headline[:60]!r}", item.published_at)
+                continue
+            kept.append(item)
+        self.news[key] = kept
+        if window is not None:
+            self.news_window = window
+        return kept
+
+    def headlines(self, symbol: str) -> list[NewsItem] | None:
+        """Frozen headlines for a symbol, or ``None`` if none were fetched."""
+        return self.news.get(symbol.upper())
+
+    def news_note(self) -> str:
+        if not self.news_window:
+            return "no company-news window recorded"
+        start, end = self.news_window
+        return f"company news {start.isoformat()}..{end.isoformat()} (published on or before the close)"
+
     # -- assertions ------------------------------------------------------
     def check(self, what: str, effective_at: date | None, snapshot_id: str | None = None) -> bool:
         """Assert a value belongs to this snapshot. Records rather than raises.
@@ -305,6 +365,8 @@ class ResearchSnapshot:
             "data_quality": self.data_quality.to_dict(),
             "violations": list(self.violations),
             "prices": {s: o.to_dict() for s, o in sorted(self.prices.items())},
+            "news_window": [d.isoformat() for d in self.news_window] if self.news_window else None,
+            "news": {s: [n.to_dict() for n in items] for s, items in sorted(self.news.items())},
         }
 
     def write(
@@ -370,7 +432,14 @@ class ResearchSnapshot:
             prices={s: Observation.from_dict(o) for s, o in (raw.get("prices") or {}).items()},
             data_quality=DataQuality.from_dict(raw.get("data_quality") or {}),
             violations=list(raw.get("violations") or []),
+            news={
+                s: [NewsItem.from_dict(n) for n in items]
+                for s, items in (raw.get("news") or {}).items()
+            },
         )
+        window = raw.get("news_window")
+        if window:
+            snapshot.news_window = (date.fromisoformat(window[0]), date.fromisoformat(window[1]))
         bars_dir = root / BARS_DIRNAME
         if bars_dir.is_dir():
             for csv in sorted(bars_dir.glob("*.csv")):

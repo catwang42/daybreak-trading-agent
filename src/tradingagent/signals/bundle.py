@@ -348,6 +348,7 @@ def build_default_hub(
     degraded: DegradedTracker | None = None,
     weights: dict[str, float] | None = None,
     caps: dict[str, float] | None = None,
+    as_of: date | None = None,
 ) -> SignalHub:
     """The four Milestone 3 sources.
 
@@ -365,7 +366,7 @@ def build_default_hub(
     tracker = degraded if degraded is not None else DegradedTracker()
     return SignalHub(
         sources=[
-            NewsToneSource(finnhub=finnhub, degraded=tracker),
+            NewsToneSource(finnhub=finnhub, degraded=tracker, as_of=as_of),
             InsiderSource(degraded=tracker),
             MacroSource(degraded=tracker),
             PredictionMarketSource(degraded=tracker),
