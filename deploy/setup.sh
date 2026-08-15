@@ -57,8 +57,14 @@ push_secret () {
   gcloud secrets add-iam-policy-binding "$NAME" \
     --member="serviceAccount:${SA}" --role=roles/secretmanager.secretAccessor
 }
+# Every name here is optional — push_secret skips the empty ones and the app
+# degrades the matching source rather than failing. SEC_USER_AGENT is a contact
+# address rather than a credential, but it goes through Secret Manager anyway so
+# it stays out of the job's readable env metadata. REDDIT_* is unread until the
+# pending API approval lands.
 SECRET_NAMES=(ALPACA_API_KEY ALPACA_SECRET_KEY FINNHUB_API_KEY FRED_API_KEY \
-              REDDIT_CLIENT_ID REDDIT_CLIENT_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID)
+              SEC_USER_AGENT REDDIT_CLIENT_ID REDDIT_CLIENT_SECRET \
+              TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID)
 for S in "${SECRET_NAMES[@]}"; do push_secret "$S"; done
 
 SET_SECRETS=""

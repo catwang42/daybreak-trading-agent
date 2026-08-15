@@ -72,7 +72,7 @@ def run_trader(
         market_context=evidence.market_context,
     )
     try:
-        return gateway.complete(prompt, tier="smart", schema=TraderProposal, max_tokens=1000), None
+        return gateway.complete(prompt, tier="smart", schema=TraderProposal), None
     except LLMError as exc:
         reason = str(exc)[:200]
         degraded.add(f"Trader {evidence.symbol}", reason)

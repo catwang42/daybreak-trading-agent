@@ -19,11 +19,68 @@ from __future__ import annotations
 import logging
 import warnings
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 from .validate import DegradedTracker, clean_float
 
 log = logging.getLogger(__name__)
+
+
+# Plausibility ranges, in each field's NATIVE yfinance unit (see the formatter
+# it is rendered through). These are not opinions about what a good company
+# looks like — they are the bounds outside which the number is more likely a
+# vendor error or a unit change than a fact. yfinance's `info` is an
+# undocumented scrape: `dividendYield` silently switched from a ratio to
+# percentage points in 0.2.5x, and for a while the fundamentals analyst was
+# reading a 0.91% payer as a 91% payer and building a thesis on it. A value
+# that is merely extreme is still shown, but marked SUSPECT so the analyst
+# discounts it instead of citing it.
+PLAUSIBLE: dict[str, tuple[float, float]] = {
+    "market_cap": (1e6, 1e13),
+    "trailing_pe": (0.0, 500.0),
+    "forward_pe": (-100.0, 300.0),
+    "peg": (-20.0, 20.0),
+    "price_to_sales": (0.0, 100.0),
+    "price_to_book": (-50.0, 100.0),
+    "profit_margin": (-5.0, 1.0),        # ratio; margin above 100% is arithmetic nonsense
+    "operating_margin": (-5.0, 1.0),     # ratio
+    "return_on_equity": (-10.0, 10.0),   # ratio
+    "revenue_growth": (-1.0, 10.0),      # ratio; revenue cannot fall more than 100%
+    "earnings_growth": (-50.0, 50.0),    # ratio; swings off a near-zero base are real
+    "debt_to_equity": (0.0, 2000.0),     # percentage points, i.e. up to 20x equity
+    "current_ratio": (0.0, 50.0),
+    "free_cash_flow": (-1e12, 1e12),
+    "dividend_yield": (0.0, 25.0),       # percentage points — the field that caught the unit bug
+    "beta": (-5.0, 5.0),
+    # positioning
+    "short_percent_of_float": (0.0, 1.0),    # ratio
+    "held_by_institutions": (0.0, 1.5),      # ratio; can exceed 1 when shares are lent out
+    "held_by_insiders": (0.0, 1.0),          # ratio
+    "short_ratio": (0.0, 100.0),             # days to cover
+}
+
+SUSPECT_MARK = " ⚠ SUSPECT"
+
+
+def is_suspect(name: str, value: float | None) -> bool:
+    """True when ``value`` falls outside what this field can plausibly hold."""
+    if value is None or name not in PLAUSIBLE:
+        return False
+    low, high = PLAUSIBLE[name]
+    return not (low <= value <= high)
+
+
+def _suspect_note(names: list[str]) -> list[str]:
+    if not names:
+        return []
+    return [
+        "",
+        f"**SUSPECT** ({', '.join(names)}): these values fall outside the plausible "
+        "range for their field, so they are most likely a vendor error or a units "
+        "change at the source rather than a fact about the company. Treat them as "
+        "unavailable — do not build an argument on them, and say so in your "
+        "evidence gaps if they mattered.",
+    ]
 
 
 @dataclass
@@ -50,24 +107,40 @@ class Fundamentals:
     quarters: list[dict[str, Any]] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
 
+    ROWS: ClassVar[tuple[tuple[str, str], ...]] = (
+        ("Market cap", "market_cap"),
+        ("Trailing P/E", "trailing_pe"),
+        ("Forward P/E", "forward_pe"),
+        ("PEG ratio", "peg"),
+        ("Price / sales", "price_to_sales"),
+        ("Price / book", "price_to_book"),
+        ("Profit margin", "profit_margin"),
+        ("Operating margin", "operating_margin"),
+        ("Return on equity", "return_on_equity"),
+        ("Revenue growth (yoy)", "revenue_growth"),
+        ("Earnings growth (yoy)", "earnings_growth"),
+        ("Debt / equity", "debt_to_equity"),
+        ("Current ratio", "current_ratio"),
+        ("Free cash flow (ttm)", "free_cash_flow"),
+        ("Dividend yield", "dividend_yield"),
+        ("Beta", "beta"),
+    )
+
+    def suspect_fields(self) -> list[str]:
+        """Labels of the metrics whose values are outside their plausible range."""
+        return [label for label, name in self.ROWS if is_suspect(name, getattr(self, name))]
+
     def markdown(self) -> str:
+        formatters = {
+            "market_cap": _money, "free_cash_flow": _money,
+            "profit_margin": _pct, "operating_margin": _pct, "return_on_equity": _pct,
+            "revenue_growth": _pct, "earnings_growth": _pct,
+            "debt_to_equity": _multiple, "dividend_yield": _pct_points,
+        }
         rows = [
-            ("Market cap", _money(self.market_cap)),
-            ("Trailing P/E", _num(self.trailing_pe)),
-            ("Forward P/E", _num(self.forward_pe)),
-            ("PEG ratio", _num(self.peg)),
-            ("Price / sales", _num(self.price_to_sales)),
-            ("Price / book", _num(self.price_to_book)),
-            ("Profit margin", _pct(self.profit_margin)),
-            ("Operating margin", _pct(self.operating_margin)),
-            ("Return on equity", _pct(self.return_on_equity)),
-            ("Revenue growth (yoy)", _pct(self.revenue_growth)),
-            ("Earnings growth (yoy)", _pct(self.earnings_growth)),
-            ("Debt / equity", _multiple(self.debt_to_equity)),
-            ("Current ratio", _num(self.current_ratio)),
-            ("Free cash flow (ttm)", _money(self.free_cash_flow)),
-            ("Dividend yield", _pct_points(self.dividend_yield)),
-            ("Beta", _num(self.beta)),
+            (label, formatters.get(name, _num)(getattr(self, name))
+             + (SUSPECT_MARK if is_suspect(name, getattr(self, name)) else ""))
+            for label, name in self.ROWS
         ]
         out = ["| Metric | Value |", "|---|---:|"]
         out += [f"| {label} | {value} |" for label, value in rows]
@@ -91,6 +164,7 @@ class Fundamentals:
 
         if self.missing:
             out += ["", f"Fields the free tier did not return: {', '.join(self.missing)}."]
+        out += _suspect_note(self.suspect_fields())
         return "\n".join(out)
 
 
@@ -111,25 +185,41 @@ class Positioning:
     recommendation_spread: str | None = None
     missing: list[str] = field(default_factory=list)
 
+    # Only the fields with a plausible range; the rest are rendered inline below.
+    ROWS: ClassVar[tuple[tuple[str, str], ...]] = (
+        ("Short interest (% of float)", "short_percent_of_float"),
+        ("Short ratio (days to cover)", "short_ratio"),
+        ("Held by institutions", "held_by_institutions"),
+        ("Held by insiders", "held_by_insiders"),
+    )
+
+    def suspect_fields(self) -> list[str]:
+        return [label for label, name in self.ROWS if is_suspect(name, getattr(self, name))]
+
     def markdown(self, price: float | None = None) -> str:
         gap = ""
         if price and self.target_mean:
             gap = f" — the last close is {(price / self.target_mean - 1) * 100:+.1f}% versus that mean target"
+
+        def _flagged(name: str, text: str) -> str:
+            return text + (SUSPECT_MARK if is_suspect(name, getattr(self, name)) else "")
+
         rows = [
             ("Consensus recommendation", self.recommendation_key or "unavailable"),
             ("Analysts covering", _num(self.analyst_count, digits=0)),
             ("Mean price target", _money_price(self.target_mean) + gap),
             ("Target range", f"{_money_price(self.target_low)} – {_money_price(self.target_high)}"),
             ("Recommendation spread", self.recommendation_spread or "unavailable"),
-            ("Short interest (% of float)", _pct(self.short_percent_of_float)),
-            ("Short ratio (days to cover)", _num(self.short_ratio)),
-            ("Held by institutions", _pct(self.held_by_institutions)),
-            ("Held by insiders", _pct(self.held_by_insiders)),
+            ("Short interest (% of float)", _flagged("short_percent_of_float", _pct(self.short_percent_of_float))),
+            ("Short ratio (days to cover)", _flagged("short_ratio", _num(self.short_ratio))),
+            ("Held by institutions", _flagged("held_by_institutions", _pct(self.held_by_institutions))),
+            ("Held by insiders", _flagged("held_by_insiders", _pct(self.held_by_insiders))),
         ]
         out = ["| Positioning metric | Value |", "|---|---|"]
         out += [f"| {label} | {value} |" for label, value in rows]
         if self.missing:
             out += ["", f"Fields the free tier did not return: {', '.join(self.missing)}."]
+        out += _suspect_note(self.suspect_fields())
         return "\n".join(out)
 
 
@@ -242,6 +332,13 @@ class FundamentalsClient:
             self.degraded.add(
                 f"yfinance fundamentals {symbol}",
                 f"only sparse data returned (missing {', '.join(snapshot.missing)})",
+            )
+        suspect = snapshot.suspect_fields()
+        if suspect:
+            log.warning(
+                "%s: implausible fundamentals from yfinance, marked SUSPECT in the pack: %s",
+                symbol,
+                ", ".join(suspect),
             )
         return snapshot
 

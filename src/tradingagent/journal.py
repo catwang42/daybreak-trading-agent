@@ -53,6 +53,10 @@ class JournalEntry:
     stage: str = "discovery"
     screener_score: int | None = None
     deep_dive_priority: int | None = None
+    #: source name -> -1/0/+1 as read at decision time (M3). This is what makes
+    #: the source-accuracy tracker possible: a direction recorded before the
+    #: outcome is known is the only honest way to grade a source later.
+    signal_readings: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = {key: getattr(self, key) for key in FIELD_ORDER}
@@ -61,6 +65,8 @@ class JournalEntry:
             payload["screener_score"] = self.screener_score
         if self.deep_dive_priority is not None:
             payload["deep_dive_priority"] = self.deep_dive_priority
+        if self.signal_readings:
+            payload["signal_readings"] = self.signal_readings
         return payload
 
 
@@ -90,10 +96,14 @@ def entries_from_shortlist(shortlist, run_date: date, report_path: str, stage: s
                 confidence=take.confidence if take else "",
                 report=report_path,
                 target=None,  # M1 quick takes carry no price target; M2's PM sets one
-                signal_sources=["yfinance", "finnhub", "screener:momentum-burst"],
+                signal_sources=(
+                    ["yfinance", "finnhub", "screener:momentum-burst"]
+                    + [f"signal:{s}" for s in (item.signals.sources_present if item.signals else [])]
+                ),
                 stage=stage,
                 screener_score=item.candidate.score,
                 deep_dive_priority=take.deep_dive_priority if take else None,
+                signal_readings=item.signals.readings() if item.signals else {},
             )
         )
     return out
@@ -128,10 +138,14 @@ def entries_from_deep(results, run_date: date, report_dir: str = ""):
                 confidence=decision.confidence if decision else "",
                 report=f"{prefix}/{result.symbol}.md",
                 target=decision.price_target if decision else None,
-                signal_sources=list(DEEP_SIGNAL_SOURCES),
+                signal_sources=(
+                    list(DEEP_SIGNAL_SOURCES)
+                    + [f"signal:{s}" for s in sorted(result.queued.signal_readings)]
+                ),
                 stage="deep",
                 screener_score=result.queued.screener.get("score"),
                 deep_dive_priority=result.queued.priority or None,
+                signal_readings=dict(result.queued.signal_readings),
             )
         )
     return out
