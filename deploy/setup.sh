@@ -60,10 +60,10 @@ push_secret () {
 # Every name here is optional — push_secret skips the empty ones and the app
 # degrades the matching source rather than failing. SEC_USER_AGENT is a contact
 # address rather than a credential, but it goes through Secret Manager anyway so
-# it stays out of the job's readable env metadata. REDDIT_* is unread until the
-# pending API approval lands.
+# it stays out of the job's readable env metadata. There are no REDDIT_* entries:
+# that API application was rejected and no social source replaced it.
 SECRET_NAMES=(ALPACA_API_KEY ALPACA_SECRET_KEY FINNHUB_API_KEY FRED_API_KEY \
-              SEC_USER_AGENT REDDIT_CLIENT_ID REDDIT_CLIENT_SECRET \
+              SEC_USER_AGENT \
               TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID)
 for S in "${SECRET_NAMES[@]}"; do push_secret "$S"; done
 

@@ -171,8 +171,8 @@ class Evidence:
             "",
             "### Coverage limit",
             "",
-            "- Still no social-media or retail-forum data: the Reddit API now requires manual "
-            "approval and ours is pending. Insider filings are what corporate officers did with "
+            "- No social-media or retail-forum data, and none is coming from Reddit: the API "
+            "application was rejected. Insider filings are what corporate officers did with "
             "their own money and headline tone is what the press said — neither is a proxy for "
             "retail positioning, so do not treat them as one.",
         ]
@@ -240,7 +240,7 @@ class Evidence:
                 )
             )
         rows.append(
-            ("Social / retail sentiment", "not collected — Reddit API approval pending", "—")
+            ("Social / retail sentiment", "not collected — no source wired up", "—")
         )
         return rows
 

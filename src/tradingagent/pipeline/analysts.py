@@ -10,9 +10,10 @@ Deviations:
 - Upstream's analysts are tool-calling LangGraph nodes; ours read a pre-built
   evidence pack (see :mod:`tradingagent.pipeline.evidence`).
 - Upstream's social-media analyst reads Reddit and StockTwits. We have no social
-  source in this milestone, so the role is narrowed to sentiment *positioning*
-  (sell-side posture, short interest, crowding) and its prompt forbids it from
-  inventing retail sentiment it cannot source. Social inputs land in M3.
+  source at all — the Reddit API application was rejected and M3 shipped without
+  a replacement — so the role is narrowed to sentiment *positioning* (sell-side
+  posture, short interest, crowding) and its prompt forbids it from inventing
+  retail sentiment it cannot source.
 - Output is schema-enforced (:class:`~.schemas.AnalystReport`) with one
   re-prompt; a second failure marks that analyst DEGRADED and the pipeline
   continues with three voices rather than aborting the ticker.

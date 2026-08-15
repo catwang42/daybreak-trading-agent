@@ -6,10 +6,10 @@ that re-ranks the shortlist and feeds the analyst and debate prompts. They
 share nothing but this module: each client owns its own transport, its own
 rate limits and its own failure mode, and hands back :class:`Signal` objects.
 
-That indirection is the point. A fifth source (Reddit or StockTwits social
-sentiment, blocked on manual API approval at the time of writing) has to
-implement :class:`SignalSource` and be added to the registry; nothing in the
-bundle, the ranking, the prompts or the accuracy tracker needs to change. The
+That indirection is the point. A fifth source — social sentiment, a slot left
+open after the Reddit API application was rejected — has to implement
+:class:`SignalSource` and be added to the registry; nothing in the bundle, the
+ranking, the prompts or the accuracy tracker needs to change. The
 same is true in the other direction: Gate 3 asks whether each source changes
 decisions or just burns tokens, and dropping one is a registry edit.
 

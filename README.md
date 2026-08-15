@@ -169,8 +169,11 @@ that would remove a limitation are listed there too, and never purchased automat
 
 Four independent sources run once per discovery pass and fuse into a per-ticker bundle
 (`src/tradingagent/signals/`). They share nothing but the `SignalSource` contract, so a
-fifth — social sentiment, blocked on Reddit's manual API approval — is a registry edit,
-and dropping a noisy one is a one-line change.
+fifth — social sentiment — is a registry edit, and dropping a noisy one is a one-line
+change. That fifth slot is open, not scheduled: Reddit was the intended source and our
+API application was rejected, so the agent has no retail-chatter input at all. Any client
+implementing `SignalSource` can fill the slot without touching the bundle, the ranking,
+the prompts or the accuracy tracker.
 
 The bundle acts in two places, and deliberately nowhere else:
 
