@@ -24,11 +24,14 @@ log = logging.getLogger(__name__)
 
 CONTEXT_FILENAME = "discovery-context.json"
 # v2 (M3) adds the signal layer. v3 (M6) names the research snapshot the queue
-# was built from. Bumped rather than defaulted silently, both times: a v2
-# context would parse cleanly with an empty snapshot id, and the deep stage
-# would then go and download its own bars — which is the exact drift M6 exists
-# to remove. Forcing a discovery re-run is the honest failure.
-SCHEMA_VERSION = 3
+# was built from. v4 (M6) carries the macro calendar as objects with their
+# confidence class, not just as rendered text. Bumped rather than defaulted
+# silently, every time: a v2 context would parse cleanly with an empty snapshot
+# id and the deep stage would go and download its own bars, and a v3 one would
+# parse with no macro events and let an indicative date gate an entry — the two
+# exact drifts M6 exists to remove. Forcing a discovery re-run is the honest
+# failure.
+SCHEMA_VERSION = 4
 
 
 @dataclass
@@ -94,6 +97,11 @@ class DeepContext:
     run_date: str
     market_context: str = "Market context unavailable."
     macro_note: str = "none scheduled"
+    #: The window's macro releases as objects, each with the confidence class of
+    #: its source. Carried alongside the rendered note because the deep stage
+    #: has to *enforce* the permitted-use matrix, and it cannot do that against
+    #: a paragraph — see :mod:`tradingagent.pipeline.macro_gate`.
+    macro_events: list[dict[str, Any]] = field(default_factory=list)
     data_as_of: str = "unknown"
     queue: list[QueuedTicker] = field(default_factory=list)
     discovery_degraded: list[str] = field(default_factory=list)
@@ -105,6 +113,12 @@ class DeepContext:
     #: can state its as-of even if the snapshot file is missing.
     market_as_of: str = ""
     version: int = SCHEMA_VERSION
+
+    def macro_calendar(self):
+        """``macro_events`` as :class:`~..discovery.release_schedule.MacroEvent`."""
+        from ..discovery.release_schedule import MacroEvent
+
+        return [MacroEvent.from_dict(raw) for raw in self.macro_events]
 
     # -- persistence -----------------------------------------------------
     def to_json(self) -> str:

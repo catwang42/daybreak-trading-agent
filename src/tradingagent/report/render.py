@@ -120,25 +120,43 @@ def _component_label(key: str) -> str:
 def _section_macro(ctx: ReportContext) -> str:
     lines = ["## 2. Macro & Events Today", ""]
     cal = ctx.calendar
-    if not cal.macro_is_live:
+    if not cal.has_verified_dates:
         lines.append(
-            "> Economic calendar source is an **indicative static release schedule**, not a live "
-            "feed (no free live source available — see Degraded Sources). Confirm exact dates and "
-            "times before acting."
+            "> No authoritative release schedule was reachable this run, so every macro date "
+            "below is an **indicative approximation** from a weekday-of-month rule (see Degraded "
+            "Sources). None of them may be waited for; confirm dates and times before acting."
         )
         lines.append("")
 
     todays = [e for e in cal.macro if e.date == ctx.run_date]
     lines.append(
         "**Today:** "
-        + (", ".join(f"{e.name} ({e.impact})" for e in todays) if todays else "no scheduled US macro release.")
+        + (
+            ", ".join(f"{e.name} ({e.impact}, {e.confidence})" for e in todays)
+            if todays
+            else "no scheduled US macro release."
+        )
     )
     lines.append("")
-    upcoming = [e for e in cal.macro if e.date > ctx.run_date][:8]
+    upcoming = [e for e in cal.macro if e.date is None or e.date > ctx.run_date][:8]
     if upcoming:
-        lines += ["| Date | Event | Impact | Source |", "|---|---|---|---|"]
-        lines += [f"| {e.date} | {e.name} | {e.impact} | {e.source} |" for e in upcoming]
-        lines.append("")
+        lines += [
+            "| Date | Event | Impact | Confidence | Source | May gate an entry? |",
+            "|---|---|---|---|---|---|",
+        ]
+        lines += [
+            f"| {e.date.isoformat() if e.date else '—'} | {e.name} | {e.impact} | "
+            f"**{e.confidence}** | {e.source} | {'yes' if e.may_gate_entries else 'no'} |"
+            for e in upcoming
+        ]
+        lines += [
+            "",
+            "_Only a **VERIFIED** date — one published by the issuing agency — may gate an entry "
+            "or an options event-risk decision. INDICATIVE dates come from a weekday-of-month "
+            "rule and are context only; STALE means we know when it last printed, not when it "
+            "next will; MISSING means no source answered._",
+            "",
+        ]
 
     if cal.earnings_today:
         names = ", ".join(f"{e.symbol} ({e.timing})" for e in cal.earnings_today[:20])

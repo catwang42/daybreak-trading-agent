@@ -148,6 +148,10 @@ def _proposal(result: DeepResult) -> str:
         lines += ["**Notes on the levels used:**", ""]
         lines += [f"- {note}" for note in plan.warnings]
         lines.append("")
+    if plan.suppressed_gates:
+        lines += ["**Macro gates removed from this plan:**", ""]
+        lines += [f"- {note}" for note in plan.suppressed_gates]
+        lines.append("")
     if plan.corrections:
         # The prose is left as written; the disagreement is printed beside it.
         # A silently edited thesis is one nobody can audit.

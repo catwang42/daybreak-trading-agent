@@ -38,6 +38,12 @@ Propose the transaction.
   entry condition and the stop, not through a percentage of portfolio.
 - **Respect event risk.** An earnings print inside the horizon changes the
   entry, the size, or both.
+- **Only wait for a date marked VERIFIED.** Every macro release in the evidence
+  carries the confidence class of its source. A VERIFIED date came from the
+  issuing agency and may be waited for; an INDICATIVE one is a weekday-of-month
+  guess, and STALE or MISSING means we do not know when the release lands.
+  Writing "wait for Thursday's PPI" against anything but a VERIFIED date is a
+  wrong instruction, and the pipeline strikes it from the plan.
 
 Keep `reasoning` to a few sentences that a human could act on without rereading
 the whole file.

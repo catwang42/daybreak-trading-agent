@@ -52,6 +52,9 @@ class Evidence:
     run_date: date
     market_context: str
     macro_note: str
+    #: The window's releases with the confidence class of each date. The note
+    #: above is what a model reads; this is what the pipeline enforces against.
+    macro_events: list = field(default_factory=list)
     indicators: IndicatorSet | None = None
     fundamentals: Fundamentals | None = None
     positioning: Positioning | None = None
@@ -145,6 +148,10 @@ class Evidence:
             "",
             f"- Earnings: {self.queued.earnings_note}",
             f"- Macro releases in the window:\n{_indent(self.macro_note)}",
+            "- Only a VERIFIED release date may be waited for or sized around. "
+            "An INDICATIVE date is a weekday-of-month approximation, STALE means "
+            "we know when it last printed and not when it next will, and MISSING "
+            "means no source answered.",
             "",
             self.signal_block(),
         ]
@@ -359,6 +366,7 @@ class EvidenceBuilder:
             run_date=self.context.date,
             market_context=self.context.market_context,
             macro_note=self.context.macro_note,
+            macro_events=self.context.macro_calendar(),
             snapshot_id=self.snapshot.snapshot_id if self.snapshot else self.context.snapshot_id,
             market_as_of=self.snapshot.market_as_of if self.snapshot else None,
         )

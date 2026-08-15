@@ -1,12 +1,16 @@
 """Macro and earnings calendar for the "Macro & Events Today" section.
 
-Earnings come from Finnhub's free tier. The economic calendar is the one place
-where every cookbook reaches for a paid API — tradermonty's
-`economic-calendar-fetcher` requires an FMP key, and Finnhub's
-`/calendar/economic` is premium-only. Rather than add a paid service we derive
-the recurring US release schedule from published rules (BLS/BEA/Fed/Census
-publish on fixed weekday-of-month patterns) and mark the source DEGRADED so the
-report never implies it is a live feed.
+Earnings come from Finnhub's free tier. Macro dates come from the issuing
+agencies wherever we can reach them — FRED's release calendar (BLS/BEA/Census)
+and the Fed's own FOMC page — and from a static weekday-of-month rule when we
+cannot. The two are not interchangeable and are no longer presented as if they
+were: every event carries the confidence class of its source, and only a
+``VERIFIED`` date is allowed to gate a decision. See
+:mod:`tradingagent.discovery.release_schedule` for the matrix and the reason.
+
+No paid service. tradermonty's `economic-calendar-fetcher` wants an FMP key and
+Finnhub's `/calendar/economic` is premium-only; both are still tried first and
+neither is required.
 """
 
 from __future__ import annotations
@@ -14,20 +18,38 @@ from __future__ import annotations
 import calendar as _cal
 from dataclasses import dataclass
 from datetime import date, timedelta
+from typing import Any
 
 from ..data.finnhub_client import EarningsEvent, FinnhubFree
 from ..data.validate import DegradedTracker
+from .release_schedule import (
+    HIGH_IMPACT,
+    INDICATIVE,
+    MEDIUM_IMPACT,
+    MISSING,
+    PERMITTED_USE,
+    STALE,
+    STATIC_SOURCE,
+    VERIFIED,
+    MacroEvent,
+    fomc_meeting_dates,
+    fred_release_dates,
+)
 
-HIGH_IMPACT = "High"
-MEDIUM_IMPACT = "Medium"
-
-
-@dataclass
-class MacroEvent:
-    date: date
-    name: str
-    impact: str
-    source: str
+__all__ = [
+    "CalendarView",
+    "MacroEvent",
+    "HIGH_IMPACT",
+    "MEDIUM_IMPACT",
+    "VERIFIED",
+    "INDICATIVE",
+    "STALE",
+    "MISSING",
+    "PERMITTED_USE",
+    "build_calendar",
+    "static_release_calendar",
+    "earnings_within",
+]
 
 
 @dataclass
@@ -35,7 +57,39 @@ class CalendarView:
     macro: list[MacroEvent]
     earnings_today: list[EarningsEvent]
     earnings_week: list[EarningsEvent]
-    macro_is_live: bool
+
+    @property
+    def has_verified_dates(self) -> bool:
+        """Did any macro date come from an issuing agency this run?"""
+        return any(e.confidence == VERIFIED for e in self.macro)
+
+    def gating_events(self) -> list[MacroEvent]:
+        """The only events a model may wait for or size around."""
+        return [e for e in self.macro if e.may_gate_entries]
+
+    def confidence_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for event in self.macro:
+            counts[event.confidence] = counts.get(event.confidence, 0) + 1
+        return counts
+
+    def note(self, limit: int = 8) -> str:
+        """The macro block as every prompt and report sees it.
+
+        The permitted-use line travels with the dates, always. A model handed a
+        bare list has no way to know that one of them is a guess — and one
+        handed an all-VERIFIED list still needs to know it may not wait for a
+        release that is not on it.
+        """
+        shown = self.macro[:limit]
+        lines = [f"- {e.label()}" for e in shown] or ["- none scheduled"]
+        lines.append(
+            "- Only a VERIFIED date may be waited for or sized around. An "
+            "INDICATIVE, STALE or MISSING date is background context and must "
+            "never become an instruction to wait for a release, and a release "
+            "absent from this list has no date at all."
+        )
+        return "\n".join(lines)
 
 
 def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
@@ -60,8 +114,9 @@ def _business_day(year: int, month: int, n: int) -> date:
 def static_release_calendar(start: date, end: date) -> list[MacroEvent]:
     """Recurring US macro releases by their published scheduling rule.
 
-    Indicative, not a live feed: exact dates shift for holidays and FOMC meeting
-    dates are set annually. Always reported alongside a DEGRADED note.
+    A guess, and marked as one: every event returned is INDICATIVE. Exact dates
+    shift for holidays and the agencies set them a year ahead, so this is only
+    ever the fallback for a release whose real schedule we could not fetch.
     """
     events: list[MacroEvent] = []
     month_cursor = date(start.year, start.month, 1)
@@ -84,7 +139,7 @@ def static_release_calendar(start: date, end: date) -> list[MacroEvent]:
         ]
         for when, name, impact in candidates:
             if start <= when <= end:
-                events.append(MacroEvent(when, name, impact, "static release schedule"))
+                events.append(MacroEvent(when, name, impact, STATIC_SOURCE, INDICATIVE))
         month_cursor = (
             date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
         )
@@ -92,10 +147,17 @@ def static_release_calendar(start: date, end: date) -> list[MacroEvent]:
     day = start
     while day <= end:
         if day.weekday() == 3:  # Thursday
-            events.append(MacroEvent(day, "Initial Jobless Claims", MEDIUM_IMPACT, "static release schedule"))
+            events.append(
+                MacroEvent(day, "Initial Jobless Claims", MEDIUM_IMPACT, STATIC_SOURCE, INDICATIVE)
+            )
         day += timedelta(days=1)
 
-    return sorted(events, key=lambda e: (e.date, e.name))
+    return sort_events(events)
+
+
+def sort_events(events: list[MacroEvent]) -> list[MacroEvent]:
+    """Dated events first, in order; undated (MISSING) ones last."""
+    return sorted(events, key=lambda e: (e.date or date.max, e.name))
 
 
 def build_calendar(
@@ -104,28 +166,73 @@ def build_calendar(
     universe_symbols: set[str],
     degraded: DegradedTracker,
     horizon_days: int = 7,
+    as_of: date | None = None,
+    session: Any = None,
+    api_key: str | None = None,
 ) -> CalendarView:
-    end = run_date + timedelta(days=horizon_days)
+    """The window's macro releases and earnings, each labelled by source.
 
-    live_macro = finnhub.economic_calendar(run_date, end)
-    macro_is_live = bool(live_macro)
-    if macro_is_live:
-        macro = [
+    ``as_of`` is the snapshot's market date. The macro window is asked for from
+    there, not from the wall clock, so a ``--date`` backfill gets the schedule
+    that stood then (see :func:`.release_schedule.fred_release_dates`).
+    """
+    as_of = as_of or run_date
+    end = as_of + timedelta(days=horizon_days)
+
+    macro: list[MacroEvent] = []
+    notes: list[str] = []
+
+    # 1. A live feed, if the account has one. Free tiers usually do not.
+    for row in finnhub.economic_calendar(as_of, end) or []:
+        if str(row.get("country", "US")).upper() not in {"US", "USA"}:
+            continue
+        when = _iso(row.get("time"))
+        if when is None:
+            continue
+        macro.append(
             MacroEvent(
-                date=date.fromisoformat(str(row.get("time", ""))[:10]),
-                name=str(row.get("event", "")).strip(),
+                date=when,
+                name=str(row.get("event", "")).strip() or "unnamed release",
                 impact=str(row.get("impact", "")).title() or MEDIUM_IMPACT,
-                source="Finnhub",
+                source="Finnhub economic calendar",
+                confidence=VERIFIED,
             )
-            for row in live_macro
-            if str(row.get("country", "US")).upper() in {"US", "USA"}
-        ]
+        )
+
+    # 2. The agencies themselves.
+    fred, fred_notes, answered = fred_release_dates(as_of, end, session=session, api_key=api_key)
+    fomc, fomc_notes = fomc_meeting_dates(as_of, end, session=session)
+    macro += fred + fomc
+    notes += fred_notes + fomc_notes
+    if fomc_notes:
+        # The Fed page is the only source for meeting dates and there is no
+        # rule to fall back on, so an unreachable page is a named unknown.
+        macro.append(MacroEvent(None, "FOMC decision", HIGH_IMPACT, "no source reached", MISSING))
+
+    # 3. The static rule, only for releases nobody authoritative covered. A
+    # release the agency schedule answered for is covered even when the answer
+    # was "nothing due" — printing a guessed date there would invent a release.
+    covered = {e.name for e in macro if e.confidence in (VERIFIED, STALE, MISSING)} | answered
+    macro += [e for e in static_release_calendar(as_of, end) if e.name not in covered]
+
+    macro = _dedupe(sort_events(macro))
+    counts = CalendarView(macro, [], []).confidence_counts()
+    if counts.get(VERIFIED):
+        if notes:
+            degraded.add(
+                "Economic calendar",
+                "partially authoritative — "
+                + "; ".join(notes[:3])
+                + f"; {counts.get(INDICATIVE, 0)} date(s) fall back to the indicative "
+                "static schedule and may not gate an entry",
+            )
     else:
-        macro = static_release_calendar(run_date, end)
         degraded.add(
             "Economic calendar",
-            "no free live source (Finnhub premium / FMP paid); using an indicative "
-            "static release schedule — verify exact dates and times before acting",
+            "no authoritative schedule reached ("
+            + ("; ".join(notes[:3]) or "no source answered")
+            + ") — every macro date below is an indicative approximation and may not "
+            "gate an entry; verify before acting",
         )
 
     all_earnings = finnhub.earnings_calendar(run_date, end)
@@ -135,8 +242,26 @@ def build_calendar(
         macro=macro,
         earnings_today=[e for e in relevant if e.date == run_date],
         earnings_week=sorted(relevant, key=lambda e: (e.date, e.symbol)),
-        macro_is_live=macro_is_live,
     )
+
+
+def _iso(raw: Any) -> date | None:
+    try:
+        return date.fromisoformat(str(raw)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _dedupe(events: list[MacroEvent]) -> list[MacroEvent]:
+    """One row per (date, release). The most confident source wins."""
+    best: dict[tuple[Any, str], MacroEvent] = {}
+    rank = {VERIFIED: 0, STALE: 1, INDICATIVE: 2, MISSING: 3}
+    for event in events:
+        key = (event.date, event.name.lower())
+        current = best.get(key)
+        if current is None or rank[event.confidence] < rank[current.confidence]:
+            best[key] = event
+    return sort_events(list(best.values()))
 
 
 def earnings_within(view: CalendarView, symbol: str, days: int, run_date: date) -> EarningsEvent | None:

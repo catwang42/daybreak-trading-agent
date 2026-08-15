@@ -43,7 +43,7 @@ def context(shortlist=None, degraded=None, ledger=None):
         ),
         calendar=CalendarView(
             macro=static_release_calendar(date(2026, 8, 14), date(2026, 8, 21)),
-            earnings_today=[], earnings_week=[], macro_is_live=False,
+            earnings_today=[], earnings_week=[],
         ),
         shortlist=shortlist if shortlist is not None else [],
         degraded=degraded or DegradedTracker(),

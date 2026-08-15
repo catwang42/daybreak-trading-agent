@@ -135,6 +135,40 @@ even when it falls inside the requested date.
   `date.today()` / `datetime.now()` appears outside a small reviewed allowlist (the
   `--date` default, the market-clock lookup, and the live options quotes).
 
+### Which dates may be waited for
+
+Every macro date carries the confidence class of the source it came from, and only one
+class may change a decision:
+
+| Class | Where it comes from | May gate an entry or options event risk? |
+|---|---|---|
+| `VERIFIED` | the issuing agency's own published schedule, fetched for this run — FRED's release-date mirror of BLS/BEA/Census, or the Fed's FOMC calendar | **yes** |
+| `INDICATIVE` | our static weekday-of-month rule | no — context only |
+| `STALE` | an agency schedule answered, but its newest date for that release is already behind the run's market date | no — that is when it last printed, not when it next will |
+| `MISSING` | we expect the release and no source gave us a date | no — named as unknown, never guessed at |
+
+This is a defect fix too. Every date used to come from the static rule and every date was
+printed the same way, so one report told a reader to wait for "Thursday's PPI" when PPI
+was on the Wednesday, and another to enter after a Retail Sales print that had already
+happened two days earlier. The rule is a decent guess at when an agency *usually*
+publishes; it is not a schedule.
+
+- The schedule is fetched as-of-safely: FRED's realtime window is set to exactly the
+  window being reported on, so a `--date` backfill gets the calendar that stood then, not
+  the one that stands today.
+- A release the agency schedule answered for with no date due is **left out**, not
+  back-filled with a guess — the static rule only fills releases nobody authoritative
+  covered (ISM, which is a private survey FRED does not carry).
+- The permitted-use rule travels with the dates into every prompt and into report
+  section 1, so a model reading them knows which are real.
+- It is enforced in code, not asked for in prose: after the portfolio manager rules,
+  `src/tradingagent/pipeline/macro_gate.py` reads the thesis, ruling and summary back and
+  strikes any "wait until <release>" that rests on a non-VERIFIED date. The paragraph
+  stays as written; the plan prints **"Macro gates removed from this plan"** with the
+  reason, and the entry stands on the levels in the table.
+- Nothing here is a new paid service. FRED is already a dependency and the Fed's calendar
+  page needs no key; both degrade to the labelled static rule rather than failing the run.
+
 ### Who does the arithmetic
 
 The models decide **intent**; the pipeline computes every number that follows from it.
@@ -278,10 +312,11 @@ and attributes each ticker's spend to the tier that incurred it.
 |---|---|---|
 | yfinance | OHLCV for the S&P 500 universe, index proxies, sector ETFs, VIX; fundamentals, quarterly statements, analyst targets, short interest | unofficial API, rate-limited; `info` fields come and go, each is validated |
 | Alpaca (paper) | market clock/calendar, snapshot cross-check, option chains and contract open interest | paper endpoints only, enforced in code; OPRA needs a signed agreement (403) → `indicative` quotes, no greeks/IV/volume, open interest settles T-1 |
-| Finnhub | earnings calendar, company news, news-tone signal | economic calendar is premium (403) → static fallback |
+| Finnhub | earnings calendar, company news, news-tone signal | economic calendar is premium (403) → agency schedules below, then the labelled static fallback |
 | RSS (Nasdaq, Seeking Alpha, Yahoo) | market-wide headline tone | unkeyed, no published limit |
 | SEC EDGAR | Form 4 insider transactions | unkeyed but fair-access rules apply: `SEC_USER_AGENT` must carry a real contact address or the source skips itself; throttled to 5 req/s against their 10 |
-| FRED | macro regime — credit spreads, VIX, curve, yields, claims, dollar | free with a key, no meaningful limit at this volume |
+| FRED | macro regime — credit spreads, VIX, curve, yields, claims, dollar; the BLS/BEA/Census release calendar behind every `VERIFIED` macro date | free with a key, no meaningful limit at this volume |
+| Federal Reserve | FOMC meeting calendar (decision days) | public page, unkeyed; unreachable → FOMC is named `MISSING`, never guessed |
 | Polymarket Gamma | event odds on Fed, recession, shutdown, tariffs | public read API, unkeyed |
 | bundled `sp500.json` | universe + GICS sectors | snapshot; refresh with `--refresh-universe` |
 

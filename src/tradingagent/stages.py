@@ -336,6 +336,9 @@ def build_deep_context(
         run_date=run_date.isoformat(),
         market_context=market_context,
         macro_note=macro_note,
+        # The rendered note is what a prompt reads; the objects are what the
+        # deep stage enforces the permitted-use matrix against.
+        macro_events=[e.to_dict() for e in calendar_view.macro],
         data_as_of=data_as_of,
         queue=queue,
         discovery_degraded=list(degraded.sources),
@@ -405,14 +408,6 @@ def run_discovery(
     # --- calendars + external context -------------------------------------
     alpaca = AlpacaPaper(settings, degraded=degraded)
     finnhub = FinnhubFree(settings, degraded=degraded)
-    calendar_view: CalendarView = build_calendar(
-        finnhub, run_date, {c.symbol for c in constituents}, degraded
-    )
-
-    macro_note = (
-        "\n".join(f"- {e.date} {e.name} ({e.impact})" for e in calendar_view.macro[:8])
-        or "- none scheduled"
-    )
     session_note = _session_note(alpaca, run_date)
 
     # --- freeze the picture ------------------------------------------------
@@ -437,6 +432,18 @@ def run_discovery(
         len(snapshot.prices),
         snapshot.universe_version,
     )
+
+    # Built after the snapshot so the macro window is asked for from the market
+    # date the run is reasoning about, not from the wall clock.
+    calendar_view: CalendarView = build_calendar(
+        finnhub,
+        run_date,
+        {c.symbol for c in constituents},
+        degraded,
+        as_of=snapshot.market_as_of,
+        api_key=settings.fred_key,
+    )
+    macro_note = calendar_view.note()
 
     if indices and alpaca.enabled:
         alpaca.quote_crosscheck("SPY", next((q.price for q in indices if q.symbol == "SPY"), 0.0))

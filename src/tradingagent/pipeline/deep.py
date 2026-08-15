@@ -38,6 +38,7 @@ from .evidence import Evidence, EvidenceBuilder
 from .portfolio_manager import run_portfolio_manager
 from .risk import RiskReview, run_risk_committee
 from .schemas import PortfolioDecision, TraderProposal
+from .macro_gate import suppressed_gates
 from .trade_plan import TradePlan, build_trade_plan, plan_texts, quoted_figure_corrections
 from .trader import run_trader
 
@@ -230,9 +231,16 @@ def analyze_ticker(
             result.decision.price_target,
             snapshot=snapshot,
         )
-        result.trade_plan.corrections = quoted_figure_corrections(
-            result.trade_plan, plan_texts(result.proposal, result.decision)
-        )
+        texts = plan_texts(result.proposal, result.decision)
+        result.trade_plan.corrections = quoted_figure_corrections(result.trade_plan, texts)
+        # A wait that rests on an approximate release date is struck out here,
+        # not argued with: the models never see which dates are schedules.
+        result.trade_plan.suppressed_gates = suppressed_gates(texts, evidence.macro_events)
+        if result.trade_plan.suppressed_gates:
+            log.warning(
+                "Deep %s: %d macro gate(s) suppressed — unverified release date",
+                evidence.symbol, len(result.trade_plan.suppressed_gates),
+            )
         if result.trade_plan.corrections:
             log.warning(
                 "Deep %s: %d quoted figure(s) disagree with the computed plan",

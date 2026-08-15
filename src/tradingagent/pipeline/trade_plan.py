@@ -101,6 +101,9 @@ class TradePlan:
     warnings: list[str] = field(default_factory=list)
     #: Figures the models quoted that disagree with the computed ones.
     corrections: list[str] = field(default_factory=list)
+    #: "Wait until <release>" instructions struck out because the date behind
+    #: them is not VERIFIED — see :mod:`.macro_gate`.
+    suppressed_gates: list[str] = field(default_factory=list)
 
     @property
     def actionable(self) -> bool:
@@ -143,6 +146,7 @@ class TradePlan:
             "size_pct": round(self.size_pct, 2) if self.size_pct is not None else None,
             "snapshot_id": self.snapshot_id,
             "failures": list(self.failures),
+            "suppressed_gates": list(self.suppressed_gates),
         }
 
 
