@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 from tradingagent.discovery.shortlist import QuickTake
 from tradingagent.llm import (
     _CHARS_PER_TOKEN,
+    EmptyCompletion,
+    LLMError,
     LLMGateway,
     SchemaViolation,
     TokenLedger,
@@ -37,7 +39,11 @@ class FakeSettings:
 
 
 def gateway(replies):
-    """Gateway whose transport returns `replies` in order."""
+    """Gateway whose transport returns `replies` in order.
+
+    A reply that is an exception is raised rather than returned, so a provider
+    that answers with nothing can be scripted alongside one that answers badly.
+    """
     gw = LLMGateway.__new__(LLMGateway)
     gw.settings = FakeSettings()
     gw.ledger = TokenLedger()
@@ -45,7 +51,11 @@ def gateway(replies):
 
     def fake_call(prompt, *, tier, system, max_tokens, temperature):
         gw.calls.append(prompt)
-        return replies.pop(0)
+        reply = replies.pop(0)
+        if isinstance(reply, Exception):
+            gw.ledger.record_failure(tier)
+            raise reply
+        return reply
 
     gw._call = fake_call
     return gw
@@ -77,6 +87,36 @@ def test_schema_violation_triggers_exactly_one_reprompt():
     assert result.rating == "Hold"
     assert len(gw.calls) == 2
     assert "was rejected" in gw.calls[1]
+
+
+def test_an_empty_reply_buys_the_same_one_reprompt_as_a_malformed_one():
+    """An empty completion is malformed output, not a dead provider.
+
+    The request was accepted and billed; CLAUDE.md's rule for output that does
+    not match the schema is one re-prompt before DEGRADED, and a reply with
+    nothing in it fails the schema as surely as a truncated one. Seen live: the
+    options strategist lost a ticker to a single empty reply.
+    """
+    gw = gateway([EmptyCompletion("empty"), '{"rating":"Buy","score":9}'])
+    result = gw.complete("go", tier="smart", schema=Reply)
+    assert result.score == 9
+    assert len(gw.calls) == 2
+    assert "previous reply was empty" in gw.calls[1]
+
+
+def test_two_empty_replies_surface_to_the_caller_rather_than_looping():
+    gw = gateway([EmptyCompletion("empty"), EmptyCompletion("empty again")])
+    with pytest.raises(LLMError):
+        gw.complete("go", tier="smart", schema=Reply)
+    assert len(gw.calls) == 2
+
+
+def test_a_transport_failure_is_not_re_prompted_as_if_it_were_bad_output():
+    """A dead provider must not be billed twice for the same call."""
+    gw = gateway([LLMError("provider is down")])
+    with pytest.raises(LLMError):
+        gw.complete("go", tier="smart", schema=Reply)
+    assert len(gw.calls) == 1
 
 
 def test_second_violation_raises_rather_than_looping():

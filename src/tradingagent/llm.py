@@ -55,6 +55,16 @@ class SchemaViolation(LLMError):
     """Model output did not match the requested schema, twice."""
 
 
+class EmptyCompletion(LLMError):
+    """The provider answered, but with nothing in it.
+
+    Separate from :class:`LLMError` because it is a malformed *reply*, not a
+    failed call: the request was accepted, billed and accounted for. CLAUDE.md's
+    rule for malformed output is one re-prompt before DEGRADED, so the schema
+    path treats this like a validation error rather than a dead provider.
+    """
+
+
 @dataclass
 class Usage:
     """Token counters for one tier."""
@@ -178,20 +188,24 @@ class LLMGateway:
         max_tokens = max_tokens or token_budget(schema)
 
         json_prompt = f"{prompt}\n\n{_schema_instruction(schema)}"
-        raw = self._call(json_prompt, tier=tier, system=system, max_tokens=max_tokens, temperature=temperature)
         try:
+            raw = self._call(
+                json_prompt, tier=tier, system=system, max_tokens=max_tokens, temperature=temperature
+            )
             return _parse_schema(raw, schema)
-        except (ValidationError, ValueError) as first_error:
+        except (ValidationError, ValueError, EmptyCompletion) as first_error:
             log.warning(
                 "Schema violation on tier=%s (%s): %s; re-prompting once.",
                 tier,
                 schema.__name__,
                 _violation_digest(first_error),
             )
-            repair = (
-                f"{json_prompt}\n\nYour previous reply was rejected:\n{first_error}\n"
-                "Reply again with ONLY the corrected JSON object."
+            rejected = (
+                "Your previous reply was empty."
+                if isinstance(first_error, EmptyCompletion)
+                else f"Your previous reply was rejected:\n{first_error}"
             )
+            repair = f"{json_prompt}\n\n{rejected}\nReply again with ONLY the corrected JSON object."
             raw2 = self._call(repair, tier=tier, system=system, max_tokens=max_tokens, temperature=temperature)
             try:
                 return _parse_schema(raw2, schema)
@@ -256,7 +270,7 @@ class LLMGateway:
         content = _extract_text(response)
         if not content.strip():
             self.ledger.record_failure(tier)
-            raise LLMError(f"Empty completion from tier={tier} model={model}")
+            raise EmptyCompletion(f"Empty completion from tier={tier} model={model}")
         return content
 
     def _account(self, response: Any, *, tier: str, model: str) -> None:
