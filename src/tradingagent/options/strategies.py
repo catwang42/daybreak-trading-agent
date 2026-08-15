@@ -72,6 +72,14 @@ class StrategyRules:
     delta_high: float = 0.30
     delta_tolerance: float = 0.05
     min_open_interest: int = 20
+    #: A measurable spread wider than this is a rejection, not a penalty: half
+    #: of it is paid entering and half exiting, which is most of the credit on
+    #: a 0.25-delta contract. A book with no measurable spread — one-sided, or
+    #: no two-way market at all — is *not* rejected on that ground: the free
+    #: indicative feed returns whole chains one-sided outside market hours, so
+    #: rejecting them would silently empty the screen on every evening run.
+    #: Those are scored down and printed as priced off the bid / last / prior
+    #: close instead, so the human sees the unverifiable exit cost.
     max_spread_pct: float = 20.0
     min_credit: float = 0.10
     max_candidates: int = 3
@@ -403,18 +411,20 @@ def score_candidate(candidate: OptionCandidate, rules: StrategyRules) -> OptionC
     spread = candidate.quote.spread_pct
     if spread is None:
         score -= 1.0
-        notes.append(f"one-sided book, priced off the {candidate.quote.price_basis} (−1.0)")
+        notes.append(
+            f"one-sided book — exit cost unverifiable, priced off the "
+            f"{candidate.quote.price_basis} (−1.0)"
+        )
     elif spread < 5:
         score += 1.0
         notes.append(f"spread {spread:.1f}% (+1.0)")
     elif spread < 10:
         score += 0.5
         notes.append(f"spread {spread:.1f}% (+0.5)")
-    elif spread < rules.max_spread_pct:
-        notes.append(f"spread {spread:.1f}% — wide (0.0)")
     else:
-        score -= 1.0
-        notes.append(f"spread {spread:.1f}% — too wide to price (−1.0)")
+        # Above ``max_spread_pct`` the candidate has already been rejected by
+        # hard_filters; this branch is what a relaxed screen would score.
+        notes.append(f"spread {spread:.1f}% — wide (0.0)")
 
     # 4. IV level: too low is not worth the obligation, too high is a warning.
     if candidate.iv is not None:
@@ -551,6 +561,11 @@ def hard_filters(candidate: OptionCandidate, rules: StrategyRules) -> str | None
         return "delta too low — not worth the obligation"
     if q.open_interest is not None and q.open_interest < rules.min_open_interest:
         return f"open interest under {rules.min_open_interest}"
+    if q.spread_pct is not None and q.spread_pct > rules.max_spread_pct:
+        # A spread this wide is not a price, it is a range. Half of it is paid
+        # on the way in and half on the way out, which on a 0.25-delta put is
+        # most of the credit the trade exists to collect.
+        return f"spread wider than {rules.max_spread_pct:.0f}%"
     return None
 
 

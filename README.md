@@ -256,6 +256,14 @@ a **smart-tier** strategist that must name one by OCC symbol or answer `none`. A
 that was not in the table is treated as a hallucination: the pick is dropped and the
 ticker marked DEGRADED.
 
+The 20% spread limit is a rejection, in the code as well as in this paragraph — half the
+spread is paid entering and half exiting, which on a 0.25-delta contract is most of the
+credit the trade exists to collect. A book with **no measurable spread** is a different
+case and is treated differently: one-sided quotes are scored down and printed as *exit
+cost unverifiable, priced off the bid / last trade / prior close*, not dropped. The free
+indicative feed returns whole chains one-sided outside market hours, so rejecting them
+would empty every evening run's screen without saying so.
+
 That is **at most one extra LLM call per ticker**, and none for names the verdict skips
 or the screen empties. Section 6 of the brief carries the index; section 6 of each deep
 report carries the candidates, the reasoning and the data caveats; every recommendation is

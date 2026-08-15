@@ -253,6 +253,41 @@ def test_missing_open_interest_is_not_treated_as_illiquid():
     assert "open interest unreported" in " ".join(candidate.notes)
 
 
+def test_a_spread_over_the_limit_is_rejected_not_merely_penalised():
+    """The README always said 20% was a rejection; the code only docked a
+    point, so a strike whose round trip costs more than the credit could still
+    be recommended."""
+    rules = StrategyRules()
+    assert hard_filters(priced(92.0, "put", spread=0.30), rules) == "spread wider than 20%"
+    assert hard_filters(priced(92.0, "put", spread=0.19), rules) is None
+
+
+def test_a_one_sided_book_is_scored_down_rather_than_dropped():
+    """The indicative feed returns whole chains one-sided outside market hours.
+    Rejecting them would empty every evening run's screen in silence, so the
+    unverifiable exit cost is priced in and printed instead."""
+    quote = synthetic(92.0, "put")
+    quote.ask = None
+    candidate = price_candidate(
+        quote, strategy=CSP, spot=SPOT, risk_free_rate=RATE, as_of=AS_OF,
+        anchor=LevelAnchor(None, "none"),
+    )
+    assert quote.spread_pct is None
+    assert hard_filters(candidate, StrategyRules()) is None
+    score_candidate(candidate, StrategyRules())
+    assert "exit cost unverifiable" in " ".join(candidate.notes)
+
+
+def test_the_whole_screen_can_fail_on_spread_and_say_so():
+    quotes = [synthetic(k, "put", spread=0.40) for k in (88.0, 92.0, 94.0)]
+    chain = ChainSlice("XYZ", "put", quotes, fetched_at=datetime(2026, 8, 14, 20, tzinfo=timezone.utc))
+    candidates, tally = build_candidates(
+        chain, strategy=CSP, spot=SPOT, levels=[], risk_free_rate=RATE, as_of=AS_OF,
+    )
+    assert candidates == []
+    assert any("spread wider than 20%" in row for row in tally)
+
+
 def test_an_in_the_money_strike_is_refused_for_both_strategies():
     rules = StrategyRules()
     assert hard_filters(priced(105.0, "put"), rules) == "in the money"
