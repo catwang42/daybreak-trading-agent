@@ -169,6 +169,38 @@ publishes; it is not a schedule.
 - Nothing here is a new paid service. FRED is already a dependency and the Fed's calendar
   page needs no key; both degrade to the labelled static rule rather than failing the run.
 
+### Which company a headline is about
+
+A news feed's idea of "news about V" is loose, and ours was looser. Finnhub's company
+endpoint returns syndicated copy tagged with a symbol the story may only appear next to
+in a list, and the RSS leg attached a headline to a ticker whenever the bare ticker token
+showed up in it. Shipped reports gave V and NFLX "SanDisk's Investor Day Puts NAND Center
+Stage" as their latest headline, gave AON a Brown & Brown story, gave STZ a Berkshire 13F
+preview, and let "Berkshire Hathaway Stock Nears Record" drive UNP's news tone to +0.68 —
+worth +5.4 ranking points — without ever mentioning Union Pacific.
+
+`src/tradingagent/data/entity.py` attaches a headline to a ticker only on evidence a
+reader would accept: a `$V` cashtag, an exchange parenthetical `(V)` / `(NYSE: V)`, or the
+issuer's name from the constituent list. A bare ticker token is never enough — too many
+symbols are ordinary words (V, A, C, ON, IT, ALL, CAT, GAP, KEY, NOW), and "A Deep Dive
+Into Chevron" is not news about Agilent. An issuer name that is itself an ordinary word
+attaches only when the headline uses it as a company: "Target Q2 Earnings Beat" does,
+"Raises Price Target to $120" does not.
+
+The feed's own tag is kept as a *lead*, at relevance 0.6 — below the 0.8 an item needs to
+be treated as news about the name. So a feed-tagged headline that never names the company:
+
+- is **excluded** from the news-tone score, from the shortlist's "Latest headline" line,
+  and from per-ticker RSS mentions;
+- is still **shown** to the news analyst, under a heading saying it was tagged by the feed
+  and is not about the ticker on its face, because a peer or sector story is worth
+  reading — the prompt forbids writing it up as the company's own news;
+- carries its relevance and the basis for it on the headline record, into the snapshot and
+  the journal, so a later review can see why a story counted or did not.
+
+On the 106 headlines of the 2026-08-14 run, 36 name their company. The other 70 were being
+read as company news. `news_tone` remains a SHADOW signal either way.
+
 ### Who does the arithmetic
 
 The models decide **intent**; the pipeline computes every number that follows from it.

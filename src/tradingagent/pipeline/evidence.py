@@ -111,8 +111,8 @@ class Evidence:
             gaps.append("company fundamentals")
         if self.positioning is None:
             gaps.append("positioning data")
-        if not self.news:
-            gaps.append("company news")
+        if not any(n.attributable for n in self.news):
+            gaps.append("company news naming the company")
         return gaps
 
     # -- rendered slices, one per analyst --------------------------------
@@ -135,13 +135,32 @@ class Evidence:
 
     def news_block(self) -> str:
         window = self.news_window_note or "last 7 days"
+        about = [n for n in self.news if n.attributable]
+        loose = [n for n in self.news if not n.attributable]
         parts = [f"### Company headlines ({window})", ""]
-        if self.news:
-            for item in self.news:
-                stamp = _stamp(item.datetime_utc)
-                parts.append(f"- [{stamp}] {item.headline} ({item.source})")
+        if about:
+            for item in about:
+                parts.append(f"- [{_stamp(item.datetime_utc)}] {item.headline} ({item.source})")
         else:
-            parts.append("- No headlines retrieved for this ticker in the window.")
+            parts.append("- No headlines naming this company were retrieved in the window.")
+        if loose:
+            # The feed tagged these to the symbol and the headline does not name
+            # the company. Shown, because a peer or sector story is worth
+            # reading; separated, because reports have attributed a SanDisk
+            # investor day to V and a Berkshire 13F to STZ.
+            parts += [
+                "",
+                f"#### Tagged to {self.symbol} by the news feed, but not about it on their face",
+                "",
+                f"These headlines do not name {self.symbol} or its issuer. They may be about "
+                "a peer, the sector, or an index. Treat them as background: do not describe "
+                f"them as {self.symbol} news and do not build a thesis on them.",
+                "",
+            ]
+            parts += [
+                f"- [{_stamp(item.datetime_utc)}] {item.headline} ({item.source})"
+                for item in loose
+            ]
         parts += [
             "",
             "### Scheduled events",
@@ -188,7 +207,9 @@ class Evidence:
         parts += [
             f"- Volume vs 20-day average: {self.queued.screener.get('volume_ratio_20d', 'unavailable')}",
             f"- Close location in the day's range: {self.queued.screener.get('close_location_pct', 'unavailable')}%",
-            f"- Headlines retrieved in the last 7 days: {len(self.news)}",
+            f"- Headlines naming the company in the last 7 days: "
+            f"{sum(1 for n in self.news if n.attributable)} "
+            f"(plus {sum(1 for n in self.news if not n.attributable)} feed-tagged, unattributed)",
             "",
             self.signal_block(),
             "",
@@ -276,7 +297,8 @@ class Evidence:
         rows.append(
             (
                 "Finnhub company news",
-                f"{len(self.news)} headline(s), published on or before the close",
+                f"{sum(1 for n in self.news if n.attributable)} of {len(self.news)} headline(s) "
+                "name the company; all published on or before the close",
                 dict(self.source_notes).get("news", self.news_window_note or "—"),
             )
         )

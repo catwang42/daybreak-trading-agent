@@ -24,6 +24,7 @@ import re
 import time
 from datetime import date, datetime, timedelta, timezone
 
+from ..data.entity import MIN_TONE_RELEVANCE, issuer_index
 from ..data.finnhub_client import NEWS_WINDOW_DAYS, FinnhubFree, news_window
 from ..snapshot import utcnow
 from .base import Signal, SignalSource
@@ -143,7 +144,13 @@ class NewsToneSource(SignalSource):
         if not self.finnhub.enabled:
             return []
         start, end = news_window(self.as_of or run_date, self.days)
-        items = self.finnhub.company_news(symbol, start, end, limit=self.limit)
+        fetched = self.finnhub.company_news(symbol, start, end, limit=self.limit)
+        # A headline the feed merely tagged with this symbol is not news about
+        # it. "Berkshire Hathaway Stock Nears Record" once carried UNP's tone
+        # to +0.68 and its ranking to +5.4 points; see
+        # :mod:`tradingagent.data.entity`.
+        items = [n for n in fetched if n.attributable]
+        loose = len(fetched) - len(items)
         scored = [(item, *score_headline(item.headline)) for item in items]
         toned = [(item, tone, hits) for item, tone, hits in scored if hits]
         if not toned:
@@ -162,8 +169,10 @@ class NewsToneSource(SignalSource):
                 direction=_sign(mean),
                 strength=min(1.0, abs(mean) * (0.6 + 0.1 * min(len(toned), 4))),
                 headline=(
-                    f"{len(toned)} of {len(items)} headlines carry directional language; "
-                    f"mean tone {mean:+.2f}. Strongest: {strongest[0].headline}"
+                    f"{len(toned)} of {len(items)} headlines that name the company carry "
+                    f"directional language; mean tone {mean:+.2f}"
+                    + (f" ({loose} feed-tagged headline(s) excluded)" if loose else "")
+                    + f". Strongest: {strongest[0].headline}"
                 ),
                 detail=detail,
                 as_of=run_date,
@@ -210,8 +219,15 @@ class NewsToneSource(SignalSource):
                     as_of=run_date,
                 )
             )
+        index = issuer_index()
         for symbol in symbols:
-            named = [(title, feed, tone) for title, feed, tone, _ in toned if _names(title, symbol)]
+            # No feed tag here: a market-wide feed says nothing about which
+            # company a story is for, so the headline has to say it itself.
+            named = [
+                (title, feed, tone)
+                for title, feed, tone, _ in toned
+                if index.resolve(title, symbol).relevance >= MIN_TONE_RELEVANCE
+            ]
             if not named:
                 continue
             mean = sum(tone for _, _, tone in named) / len(named)
@@ -267,11 +283,6 @@ class NewsToneSource(SignalSource):
                 continue
             out += [(str(e.get("title", "")).strip(), label) for e in entries[:40] if e.get("title")]
         return out
-
-
-def _names(headline: str, symbol: str) -> bool:
-    """Ticker mentioned as a word or in a (TICKER) parenthetical."""
-    return re.search(rf"(?<![A-Za-z]){re.escape(symbol)}(?![A-Za-z])", headline) is not None
 
 
 def _sign(value: float) -> int:

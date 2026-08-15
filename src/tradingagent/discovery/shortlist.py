@@ -340,10 +340,18 @@ def build_shortlist(
         news = finnhub.company_news(candidate.symbol, *window, limit=NEWS_FREEZE_LIMIT)
         if snapshot is not None:
             news = snapshot.freeze_news(candidate.symbol, news, window)
+        # Only headlines that name the company. The rest are feed-tagged
+        # syndication and have already been read as this name's news once too
+        # often (see :mod:`tradingagent.data.entity`).
+        about = [n for n in news if n.attributable]
         news_note = (
-            " | ".join(f"{n.headline} ({n.source})" for n in news[:QUICK_TAKE_HEADLINES])
-            if news
-            else "none retrieved"
+            " | ".join(f"{n.headline} ({n.source})" for n in about[:QUICK_TAKE_HEADLINES])
+            if about
+            else (
+                f"none naming the company ({len(news)} feed-tagged headline(s) excluded)"
+                if news
+                else "none retrieved"
+            )
         )
         prompt = quick_take_prompt(
             candidate,
@@ -369,7 +377,7 @@ def build_shortlist(
                 candidate=candidate,
                 take=take,
                 earnings_flag=earnings_flag,
-                news_headline=news[0].headline if news else None,
+                news_headline=next((n.headline for n in news if n.attributable), None),
                 degraded_reason=reason,
                 signals=bundle,
                 screen_rank=screen_rank,

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 
 from ..config import Settings
+from .entity import resolve
 from .validate import DegradedTracker
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,18 @@ class NewsItem:
     source: str
     url: str
     datetime_utc: int
+    #: How strongly the headline itself says it is about ``symbol``, and why.
+    #: ``None`` only for an item nobody resolved. See
+    #: :mod:`tradingagent.data.entity` — the feed's tag is not evidence.
+    relevance: float | None = None
+    match_basis: str = ""
+
+    @property
+    def attributable(self) -> bool:
+        """May this be presented, or scored, as news about ``symbol``?"""
+        from .entity import MIN_TONE_RELEVANCE
+
+        return self.relevance is None or self.relevance >= MIN_TONE_RELEVANCE
 
     @property
     def published_at(self) -> date | None:
@@ -70,6 +83,8 @@ class NewsItem:
             "source": self.source,
             "url": self.url,
             "datetime_utc": self.datetime_utc,
+            "relevance": self.relevance,
+            "match_basis": self.match_basis,
         }
 
     @classmethod
@@ -80,6 +95,10 @@ class NewsItem:
             source=str(raw.get("source", "")),
             url=str(raw.get("url", "")),
             datetime_utc=int(raw.get("datetime_utc") or 0),
+            relevance=(
+                float(raw["relevance"]) if raw.get("relevance") is not None else None
+            ),
+            match_basis=str(raw.get("match_basis", "")),
         )
 
 
@@ -231,7 +250,19 @@ class FinnhubFree:
         # future story, and it is visibly "undated" everywhere it is printed.
         items = [n for n in items if not n.datetime_utc or n.datetime_utc <= cutoff]
         items.sort(key=lambda n: n.datetime_utc, reverse=True)
-        return items[:limit]
+        return [resolve_item(n) for n in items[:limit]]
+
+
+def resolve_item(item: NewsItem) -> NewsItem:
+    """Stamp a headline with how well it matches the symbol it arrived under.
+
+    Every company-news row is feed-tagged by definition — we asked for that
+    symbol — and that tag is exactly what has to stop being treated as proof.
+    """
+    match = resolve(item.headline, item.symbol, feed_tagged=True)
+    item.relevance = match.relevance
+    item.match_basis = match.basis
+    return item
 
 
 def _num(value) -> float | None:

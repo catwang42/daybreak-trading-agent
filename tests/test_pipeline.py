@@ -422,13 +422,14 @@ def test_blocking_gaps_ignores_the_permanent_social_sentiment_limit():
     assert ev.blocking_gaps() == []
 
     ev.news = []
-    assert ev.blocking_gaps() == ["company news"]
+    assert ev.blocking_gaps() == ["company news naming the company"]
 
     ev.indicators = None
     ev.fundamentals = None
     ev.positioning = None
     assert set(ev.blocking_gaps()) == {
-        "price history", "company fundamentals", "positioning data", "company news",
+        "price history", "company fundamentals", "positioning data",
+        "company news naming the company",
     }
 
     # And the checklist condition tracks it, not `missing`.
