@@ -206,15 +206,29 @@ Deliberate deviations:
   (`risk_ruling`), so it cannot be skipped.
 - **Sentiment analyst reads positioning, not social media.** Upstream has separate
   sentiment and social-media seats over Reddit and StockTwits. Free, reliable social data
-  is still the gap: PRAW was scoped for M3 and dropped from it because the Reddit API now
-  requires manual approval and ours is pending. The single merged seat reads sell-side
-  posture, target dispersion, short interest and holder mix, plus the M3 insider and news-
-  tone signals — positioning and disclosed action rather than chatter. Neither is a proxy
-  for retail sentiment, and the prompt says so rather than letting a role treat them as
-  one. A fifth source implementing `SignalSource` is the whole change needed when the
-  approval lands; nothing in the bundle, ranking, prompts or tracker moves.
+  is still the gap, and now a permanent one on this route: PRAW was scoped for M3, and the
+  Reddit API application was **rejected**, so this is a closed door rather than a queue we
+  are waiting in. The single merged seat reads sell-side posture, target dispersion, short
+  interest and holder mix, plus the M3 insider and news-tone signals — positioning and
+  disclosed action rather than chatter. Neither is a proxy for retail sentiment, and the
+  prompt says so rather than letting a role treat them as one. The extension point is
+  unchanged and unused: one class implementing `SignalSource`, registered in
+  `signals/bundle.py`, is the whole change whenever a workable social feed turns up;
+  nothing in the bundle, ranking, prompts or tracker moves.
 - **Screener liquidity floor uses average *share* volume**, per `config/preferences.md`
   (1M shares), not the dollar-volume floor some upstream variants use.
+- **Delivery is email over SMTP, not Telegram.** `BUILD_PLAN.md` Milestone 5 and
+  `PROMPTS.md` both say Telegram; those files record the plan as written and were left
+  alone. The operator asked for email instead, and the artefact settles it: the daily
+  brief renders to ~75 KB of HTML with a dozen tables, which a chat bubble cannot show
+  and an inbox can. `delivery/email.py` needs no bot registration, no third-party
+  service holding the content, and attaches the markdown and the per-ticker deep reports
+  alongside the inline HTML. The trade is that push-to-phone becomes whatever the mail
+  client does, and there is no read receipt.
+- **Deep reports are attached rather than inlined.** Gmail clips a message body over
+  ~102 KB behind a "view entire message" link, and the brief alone is ~75 KB. Inlining
+  five deep reports would push the mandatory disclaimer footer behind that link, which is
+  the one part of the report that may not be hidden.
 
 ### Paid bottlenecks identified (not purchased — surfaced in report section 7)
 | Capability | Upstream source | Cost | Our substitute |

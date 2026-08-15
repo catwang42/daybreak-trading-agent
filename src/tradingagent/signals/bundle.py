@@ -221,10 +221,11 @@ def build_default_hub(
 ) -> SignalHub:
     """The four Milestone 3 sources.
 
-    A fifth social-sentiment source (Reddit via PRAW, or StockTwits) belongs in
-    this list and nowhere else. Reddit is not here because its API now needs
-    manual approval and ours is pending — ``REDDIT_*`` stays optional in
-    ``config/.env.example`` for when it lands.
+    A fifth social-sentiment source belongs in this list and nowhere else. That
+    slot is empty: Reddit was the intended occupant and the API application was
+    rejected, so there is no retail-chatter input and no pending one. Adding a
+    replacement (StockTwits, Bluesky, a licensed feed) means writing one
+    :class:`~tradingagent.signals.base.SignalSource` and appending it here.
     """
     from .insiders import InsiderSource
     from .macro import MacroSource
