@@ -12,17 +12,20 @@ VIX: {vix_note}
 ## Breadth
 - Composite health score: {breadth_composite}/100 — zone {breadth_zone}
 - {breadth_pct_50dma} of the S&P 500 is above its 50-day moving average
-- Suggested equity exposure for this zone: {breadth_exposure}
+- {breadth_posture}
 - Strongest breadth component: {breadth_strongest}
 - Weakest breadth component: {breadth_weakest}
 
 ## Sector rotation
 - Risk regime: {risk_regime} (cyclical-minus-defensive momentum spread {risk_score})
-- Estimated cycle phase: {cycle_phase} (confidence {cycle_confidence})
+- {sector_rotation}
 - Leading sectors: {sector_leaders}
 - Lagging sectors: {sector_laggards}
 - Overbought: {overbought}
 - Oversold: {oversold}
+
+## What these readings are
+{term_guards}
 
 ## Events in the next 7 days
 {macro_note}

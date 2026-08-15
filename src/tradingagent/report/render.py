@@ -94,8 +94,10 @@ def _section_market_overview(ctx: ReportContext) -> str:
     b = ctx.breadth
     lines += [
         "",
-        f"**VIX** {_num(ctx.vix)} · **Breadth composite** {b.composite}/100 "
-        f"({b.zone}) · **Suggested equity exposure** {b.exposure}",
+        f"**VIX** {_num(ctx.vix)} · **Breadth composite** {b.composite}/100",
+        "",
+        f"**{b.posture_reading().describe()}** — an inherited heuristic, never validated "
+        "here, and not a position size. Sizes are computed per trade in section 4.",
         "",
         f"{_num(b.breadth_pct_above_50dma, 1)}% of the {b.universe_size}-name universe is above its "
         f"50-day MA; {_num(b.breadth_pct_above_200dma, 1)}% above its 200-day MA. "
@@ -181,7 +183,8 @@ def _section_sectors(ctx: ReportContext) -> str:
         "## 3. Sector Opportunity Map",
         "",
         f"**Risk regime:** {s.risk_regime} (cyclical−defensive momentum spread {s.risk_score:+.2f}) · "
-        f"**Estimated cycle phase:** {s.cycle_phase} (confidence {s.cycle_confidence})",
+        f"**{s.rotation_reading().describe()}** — a resemblance between today's sector "
+        "leaders and a fixed table, not a reading of the economy",
         "",
         "| Sector | ETF | Bucket | % above 50DMA | 1d | 5d | 1mo | 3mo | Status |",
         "|---|---|---|---:|---:|---:|---:|---:|---|",

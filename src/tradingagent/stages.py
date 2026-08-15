@@ -64,6 +64,7 @@ from .report.render import (
 from .report.writer import replace_section, write_report
 from .signals import SignalHub, build_default_hub
 from .signals.accuracy import AccuracyReport, AccuracyTracker, realised_return
+from .semantics import guard_block
 from .snapshot import ResearchSnapshot, utcnow
 
 log = logging.getLogger(__name__)
@@ -262,12 +263,10 @@ def _market_context_block(
             f"- Date: {run_date.isoformat()} ({session_note}).",
             f"- Index moves:\n" + ("\n".join(index_lines) or "  - unavailable"),
             f"- VIX: {vix:.2f}" if vix is not None else "- VIX: unavailable",
-            f"- Breadth composite {breadth.composite}/100 ({breadth.zone}) — {breadth.guidance} "
-            f"Suggested equity exposure {breadth.exposure}.",
+            f"- Breadth composite {breadth.composite}/100 — {breadth.posture_reading().describe()}.",
             f"- {pct50} of the {breadth.universe_size}-name universe is above its 50-day MA.",
             f"- Risk regime: {sector_map.risk_regime} (cyclical−defensive momentum spread "
-            f"{sector_map.risk_score:+.2f}); estimated cycle phase {sector_map.cycle_phase} "
-            f"(confidence {sector_map.cycle_confidence}).",
+            f"{sector_map.risk_score:+.2f}); {sector_map.rotation_reading().describe()}.",
             f"- Leading sectors: {', '.join(r.sector for r in sector_map.leaders()) or 'n/a'}. "
             f"Lagging: {', '.join(r.sector for r in sector_map.laggards()) or 'n/a'}.",
             f"- Overbought sectors: {', '.join(sector_map.overbought) or 'none'}. "
@@ -499,15 +498,15 @@ def run_discovery(
                 if breadth.breadth_pct_above_50dma is not None
                 else "an unknown share"
             ),
-            breadth_exposure=breadth.exposure,
+            breadth_posture=breadth.posture_reading().describe(),
             breadth_strongest=(
                 f"{breadth.strongest.signal}" if breadth.strongest else "unavailable"
             ),
             breadth_weakest=(f"{breadth.weakest.signal}" if breadth.weakest else "unavailable"),
             risk_regime=sector_map.risk_regime,
             risk_score=f"{sector_map.risk_score:+.2f}",
-            cycle_phase=sector_map.cycle_phase,
-            cycle_confidence=sector_map.cycle_confidence,
+            sector_rotation=sector_map.rotation_reading().describe(),
+            term_guards=guard_block("breadth_posture", "sector_rotation", "breadth_cycle_position"),
             sector_leaders=", ".join(
                 f"{r.sector} ({r.momentum:+.1f})" for r in sector_map.leaders()
             )

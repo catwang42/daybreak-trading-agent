@@ -247,7 +247,7 @@ def quick_take_prompt(
         breadth_zone=breadth.zone,
         breadth_guidance=breadth.guidance,
         risk_regime=sector_map.risk_regime,
-        cycle_phase=sector_map.cycle_phase,
+        sector_rotation=sector_map.rotation_reading().describe(),
         sector_note=_sector_note(sector_map, candidate.sector),
         earnings_note=earnings_note,
         news_note=news_note,

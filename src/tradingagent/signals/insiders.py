@@ -271,7 +271,13 @@ def summarize(symbol: str, trades: list[InsiderTrade], run_date: date) -> Signal
 
     planned_note = ""
     if sales and len(discretionary_sales) < len(sales):
-        planned_note = f" {len(sales) - len(discretionary_sales)} of the sales were on 10b5-1 plans."
+        # The label travels with the number. Reports read planned sales as
+        # conviction draining away; they are scheduled months ahead on a plan
+        # the seller cannot time. See tradingagent.semantics.
+        planned_note = (
+            f" {len(sales) - len(discretionary_sales)} of the sales were on 10b5-1 plans "
+            "— scheduled in advance and NON-DIRECTIONAL, not a loss of conviction."
+        )
     headline = (
         f"{len(buys)} open-market buy(s) worth ${bought:,.0f} against {len(sales)} sale(s) "
         f"worth ${sold:,.0f} over the window; net ${net:+,.0f}.{planned_note}"

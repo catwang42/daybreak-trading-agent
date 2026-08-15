@@ -201,6 +201,26 @@ be treated as news about the name. So a feed-tagged headline that never names th
 On the 106 headlines of the 2026-08-14 run, 36 name their company. The other 70 were being
 read as company news. `news_tone` remains a SHADOW signal either way.
 
+### What a label is allowed to mean
+
+Three shipped-report defects were a model reading one of our own labels as
+something adjacent, with nothing in the pipeline able to contradict it. So the
+vocabulary is data now (`src/tradingagent/semantics.py`): a `Term` carries the canonical
+label, what the reading means, what it may never be called, and whether the mapping
+behind it was ever validated. A `Reading` binds a value to its term, and every place that
+prints one — report section, prompt, journal — takes the wording from there.
+
+| Reading | Canonical label | Never |
+|---|---|---|
+| breadth composite's cycle component | **Breadth cycle position** — where the breadth series sits between its own peak and trough | a valuation, or a claim about the market being expensive |
+| sector leader/laggard table match | **Sector rotation pattern: `early-cycle-like`** | a statement about where the economy is in its business cycle |
+| health-zone exposure band | **Breadth regime + posture** `[UNVALIDATED]` | a position size — those are computed per trade in section 4 |
+| a 10b5-1 sale | **planned sale, NON-DIRECTIONAL** | a loss of conviction, confidence eroding, insider selling pressure |
+
+The prohibitions ship *with* the numbers: the market-commentary prompt carries the guard
+block, the sentiment analyst is given the 10b5-1 rule, and the 10b5-1 count is written
+into the insider signal's own headline so the label travels with it into the journal.
+
 ### Who does the arithmetic
 
 The models decide **intent**; the pipeline computes every number that follows from it.
