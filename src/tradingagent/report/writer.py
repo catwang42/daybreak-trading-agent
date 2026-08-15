@@ -36,12 +36,6 @@ def write_report(path: Path, content: str, bucket: str = "") -> Path:
 
 def upload_to_gcs(bucket: str, local_path: Path, content: str) -> None:
     """Best-effort upload; a cloud failure must not lose the local report."""
-    try:
-        from google.cloud import storage  # optional dependency, cloud runs only
+    from ..storage import blob_name, upload_text
 
-        client = storage.Client()
-        blob_name = "/".join(local_path.parts[-3:]) if len(local_path.parts) >= 3 else local_path.name
-        client.bucket(bucket).blob(blob_name).upload_from_string(content, content_type="text/markdown")
-        log.info("Uploaded report to gs://%s/%s", bucket, blob_name)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("GCS upload to %s failed (%s); local copy retained at %s", bucket, exc, local_path)
+    upload_text(bucket, blob_name(local_path), content, content_type="text/markdown")

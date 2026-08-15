@@ -79,87 +79,108 @@ def main(
     only = [t.strip().upper() for t in tickers.split(",") if t.strip()] if tickers else None
     log.info("Stage=%s date=%s paper=%s", stage.value, settings.run_date, settings.alpaca_paper)
 
+    # Stateless containers start with an empty disk, so the journal has to come
+    # back from GCS before anything reads it — the source-accuracy tracker
+    # weights signals against weeks of history it would otherwise not have.
+    from .storage import mirror_journal, restore_journal
+
+    if settings.reports_bucket:
+        restored = restore_journal(settings.reports_bucket, settings.journal_path)
+        log.info("Journal restored from GCS: %d entries", restored)
+
     from .delivery.email import DeliveryError
     from .delivery.stage import run_report, verdicts_from_results
     from .stages import run_all, run_deep, run_discovery, run_options
 
-    if stage is Stage.report:
-        # Re-delivery only: no market data, no LLM calls, no journal writes.
-        try:
-            _echo_delivery(run_report(settings))
-        except DeliveryError as exc:
-            typer.secho(f"Delivery failed: {exc}", fg="red", err=True)
-            raise typer.Exit(1)
-        return
+    def dispatch() -> None:
+        if stage is Stage.report:
+            # Re-delivery only: no market data, no LLM calls, no journal writes.
+            try:
+                _echo_delivery(run_report(settings))
+            except DeliveryError as exc:
+                typer.secho(f"Delivery failed: {exc}", fg="red", err=True)
+                raise typer.Exit(1)
+            return
 
-    if stage is Stage.options:
-        if skip_llm:
-            typer.secho(
-                "--skip-llm makes the options strategist a no-op; nothing to run.",
-                fg="red",
-                err=True,
+        if stage is Stage.options:
+            if skip_llm:
+                typer.secho(
+                    "--skip-llm makes the options strategist a no-op; nothing to run.",
+                    fg="red",
+                    err=True,
+                )
+                raise typer.Exit(2)
+            try:
+                options = run_options(settings, only=only)
+            except FileNotFoundError as exc:
+                typer.secho(str(exc), fg="red", err=True)
+                raise typer.Exit(2)
+            _echo_options(settings, options)
+            return
+
+        if stage is Stage.deep:
+            if skip_llm:
+                typer.secho("--skip-llm makes the deep stage a no-op; nothing to run.", fg="red", err=True)
+                raise typer.Exit(2)
+            try:
+                deep = run_deep(settings, only=only)
+            except FileNotFoundError as exc:
+                typer.secho(str(exc), fg="red", err=True)
+                raise typer.Exit(2)
+            _echo_deep(settings, deep)
+            return
+
+        if stage is Stage.all:
+            if skip_llm:
+                typer.secho("--skip-llm makes the deep stage a no-op; nothing to run.", fg="red", err=True)
+                raise typer.Exit(2)
+            discovery, deep, options = run_all(
+                settings,
+                refresh_universe=refresh_universe,
+                universe_limit=universe_limit,
+                shortlist_size=shortlist_size,
+                only=only,
             )
-            raise typer.Exit(2)
-        try:
-            options = run_options(settings, only=only)
-        except FileNotFoundError as exc:
-            typer.secho(str(exc), fg="red", err=True)
-            raise typer.Exit(2)
-        _echo_options(settings, options)
-        return
+            _echo_discovery(settings, discovery)
+            _echo_deep(settings, deep)
+            _echo_options(settings, options)
 
-    if stage is Stage.deep:
-        if skip_llm:
-            typer.secho("--skip-llm makes the deep stage a no-op; nothing to run.", fg="red", err=True)
-            raise typer.Exit(2)
-        try:
-            deep = run_deep(settings, only=only)
-        except FileNotFoundError as exc:
-            typer.secho(str(exc), fg="red", err=True)
-            raise typer.Exit(2)
-        _echo_deep(settings, deep)
-        return
+            # Delivery is last, after every artefact is on disk and in GCS, so a
+            # send failure costs the email and not the run. It still exits
+            # non-zero: in Cloud Run a silent non-delivery is indistinguishable
+            # from a job that never fired, and that is worth being loud about.
+            try:
+                _echo_delivery(
+                    run_report(
+                        settings,
+                        verdicts=verdicts_from_results(deep.results),
+                        degraded=discovery.context.degraded,
+                    )
+                )
+            except DeliveryError as exc:
+                typer.secho(f"Delivery failed (reports are written): {exc}", fg="red", err=True)
+                raise typer.Exit(1)
+            return
 
-    if stage is Stage.all:
-        if skip_llm:
-            typer.secho("--skip-llm makes the deep stage a no-op; nothing to run.", fg="red", err=True)
-            raise typer.Exit(2)
-        discovery, deep, options = run_all(
+        result = run_discovery(
             settings,
             refresh_universe=refresh_universe,
             universe_limit=universe_limit,
             shortlist_size=shortlist_size,
-            only=only,
+            skip_llm=skip_llm,
         )
-        _echo_discovery(settings, discovery)
-        _echo_deep(settings, deep)
-        _echo_options(settings, options)
+        _echo_discovery(settings, result)
 
-        # Delivery is last, after every artefact is on disk and in GCS, so a
-        # send failure costs the email and not the run. It still exits non-zero:
-        # in Cloud Run a silent non-delivery is indistinguishable from a job
-        # that never fired, and that is the failure mode worth being loud about.
-        try:
-            _echo_delivery(
-                run_report(
-                    settings,
-                    verdicts=verdicts_from_results(deep.results),
-                    degraded=discovery.context.degraded,
-                )
-            )
-        except DeliveryError as exc:
-            typer.secho(f"Delivery failed (reports are written): {exc}", fg="red", err=True)
-            raise typer.Exit(1)
-        return
-
-    result = run_discovery(
-        settings,
-        refresh_universe=refresh_universe,
-        universe_limit=universe_limit,
-        shortlist_size=shortlist_size,
-        skip_llm=skip_llm,
-    )
-    _echo_discovery(settings, result)
+    try:
+        dispatch()
+    finally:
+        # In `finally` on purpose: a run that aborted halfway may still have
+        # journaled a shortlist, and losing those entries would quietly corrupt
+        # the accuracy tracker's denominator.
+        if settings.reports_bucket and mirror_journal(
+            settings.reports_bucket, settings.journal_path
+        ):
+            log.info("Journal mirrored to GCS.")
 
 
 def _echo_discovery(settings, result) -> None:
