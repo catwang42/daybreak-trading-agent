@@ -252,3 +252,71 @@ class PortfolioDecision(BaseModel):
     @classmethod
     def _coerce(cls, v: object) -> object:
         return _nullish_to_none(v)
+
+
+class OptionsRecommendation(BaseModel):
+    """The options strategist's pick from the screened candidates (SMART tier).
+
+    Deliberately narrow: the strikes, deltas, premiums and yields are computed
+    before the call and shown to the model as a table. It chooses among them
+    and explains the choice; it does not produce numbers. Every numeric field
+    here is a *copy* of one already in the candidate set, which is what makes
+    the recommendation checkable against :meth:`OptionCandidate.basis`.
+    """
+
+    recommended_contract: str = Field(
+        max_length=32,
+        description=(
+            "The OCC symbol of the contract you recommend, copied exactly from "
+            "the candidate table (e.g. V260918P00330000). Write 'none' — and "
+            "only 'none' — if no candidate is worth proposing."
+        ),
+    )
+    conviction: Confidence = Field(
+        description=(
+            "H when the strike, the premium and the equity thesis all line up "
+            "and the quote is fresh; M when one of those is weak; L when the "
+            "premium is thin, the book is stale, or the strike fights the "
+            "equity view."
+        )
+    )
+    rationale: str = Field(
+        max_length=1400,
+        description=(
+            "Why this contract and not the others in the table, in terms of the "
+            "equity verdict: what the strike assumes about the stock and why "
+            "that is the assumption worth being paid for. Name the delta, the "
+            "annualised yield and the level the strike sits against. Aim for "
+            "110 words, hard limit 1400 characters."
+        ),
+    )
+    entry_note: str = Field(
+        max_length=600,
+        description=(
+            "How a human would place this: limit price relative to the quoted "
+            "bid/ask, and what would make you not place it at all today. One or "
+            "two sentences, hard limit 600 characters."
+        ),
+    )
+    assignment_view: str = Field(
+        max_length=800,
+        description=(
+            "The outcome that is not the base case: for a put, being assigned "
+            "at the strike — is that an entry you want, at what effective cost "
+            "basis; for a call, being called away — does that leave the equity "
+            "thesis intact. Hard limit 800 characters."
+        ),
+    )
+    risk_note: str = Field(
+        max_length=600,
+        description=(
+            "The single thing most likely to make this trade wrong, naming it "
+            "specifically (earnings date, a level that must hold, a stale "
+            "quote). One sentence, hard limit 600 characters."
+        ),
+    )
+
+    @field_validator("recommended_contract", mode="before")
+    @classmethod
+    def _normalise_symbol(cls, v: object) -> object:
+        return v.strip().upper() if isinstance(v, str) else v

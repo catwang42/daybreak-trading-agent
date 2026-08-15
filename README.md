@@ -9,7 +9,7 @@ A provider-agnostic Python application, built with Claude Code as the coding ass
 | M1 | `--stage discovery` — breadth, sectors, screener, calendar, shortlist, report, journal | **done** |
 | M2 | `--stage deep` — TradingAgents debate pipeline (4 analysts → bull/bear debate → trader → risk committee → portfolio manager) | **done** |
 | M3 | signal bundle — news tone, SEC Form 4, FRED macro, Polymarket odds, plus a source-accuracy tracker | **done** |
-| M4 | `--stage options` — CSP / covered-call candidates | not started |
+| M4 | `--stage options` — CSP / covered-call candidates screened off the Alpaca paper chain | **done** |
 | M5 | Cloud Run Jobs schedule + delivery | scaffolded in `deploy/` |
 
 ## Local quickstart
@@ -23,7 +23,7 @@ Python 3.11+ is required, and it is deliberately **not** taken from whatever
 curl -LsSf https://astral.sh/uv/install.sh | sh   # one-time, installs to ~/.local/bin
 make env                                          # uv venv --python 3.11 + pinned requirements
 cp config/.env.example config/.env                # fill free keys + LLM provider
-make test                                         # 207 tests, must be green
+make test                                         # 281 tests, must be green
 ```
 
 Then each session:
@@ -48,9 +48,10 @@ set `REPORTS_BUCKET` to mirror them to GCS instead).
 ### CLI
 
 ```
-python -m tradingagent --stage all              # discovery + deep, one shared ledger
+python -m tradingagent --stage all              # discovery + deep + options, one shared ledger
                        --stage discovery        # scan, screen, shortlist, queue only
                        --stage deep             # deep-dive the queue from an earlier discovery
+                       --stage options          # option overlay on an earlier deep run's verdicts
                        --date 2026-08-13        # re-run for a past session
                        --shortlist 5            # shortlist size (default 10)
                        --limit 100              # cap universe, for quick smoke runs
@@ -87,6 +88,41 @@ Running `deep` standalone the morning after a discovery run is supported — it 
 stored context instead of re-screening the universe, so it only downloads bars for the
 queued names.
 
+### The options stage
+
+`deep` writes `reports/<date>/options-context.json` — each verdict plus the spot, the
+named support/resistance levels the analysts argued over, and the dividend yield. `options`
+reads it, so the overlay can run hours later without re-running a debate.
+
+The verdict picks the strategy, and a verdict that wants neither gets no call:
+
+| PM rating | Overlay | Strike anchored to |
+|---|---|---|
+| Buy, Overweight | cash-secured put — get paid to bid below the market | nearest support below spot |
+| Hold | covered call — sell upside the analysis does not expect | nearest resistance or the price target above spot |
+| Underweight, Sell | none, with the reason printed | — |
+
+For each ticker it pulls that side of the Alpaca **paper** chain at 21–45 DTE, solves IV
+and delta per contract with Black-Scholes (the free feed supplies neither), rejects
+in-the-money strikes, deltas outside 0.20–0.30, open interest under 20, spreads over 20%
+and credits under $0.10, scores the survivors on delta fit, liquidity, IV level,
+annualised yield, earnings-before-expiry and level alignment, then hands the top three to
+a **smart-tier** strategist that must name one by OCC symbol or answer `none`. A symbol
+that was not in the table is treated as a hallucination: the pick is dropped and the
+ticker marked DEGRADED.
+
+That is **at most one extra LLM call per ticker**, and none for names the verdict skips
+or the screen empties. Section 6 of the brief carries the index; section 6 of each deep
+report carries the candidates, the reasoning and the data caveats; every recommendation is
+journalled with its full basis and the alternatives it beat.
+
+Free-tier reality, stated on every report rather than hidden: Alpaca's OPRA feed requires
+a signed subscriber agreement (403 without one), so quotes come from the `indicative`
+feed, which carries no greeks, no IV and no per-contract volume. Open interest comes from
+the contracts endpoint and settles a day behind. Run outside market hours and the
+premiums are the previous session's marks — the report says which timestamp produced
+each number and how old it is.
+
 ### LLM configuration
 
 Every model call goes through `src/tradingagent/llm.py` (LiteLLM). Three cost tiers, all
@@ -95,7 +131,7 @@ set by env — the code never names a provider:
 | Tier | Env var | Used by |
 |---|---|---|
 | fast | `LLM_FAST_MODEL` | the four analysts, quick takes, summarization |
-| smart | `LLM_SMART_MODEL` | bull/bear researchers, research manager, trader, the three risk seats |
+| smart | `LLM_SMART_MODEL` | bull/bear researchers, research manager, trader, the three risk seats, the options strategist |
 | deep | `LLM_DEEP_MODEL` | portfolio-manager verdict only; falls back to smart if unset |
 
 Default config targets Vertex AI with Application Default Credentials
@@ -117,7 +153,7 @@ and attributes each ticker's spend to the tier that incurred it.
 | Source | Used for | Free-tier limits |
 |---|---|---|
 | yfinance | OHLCV for the S&P 500 universe, index proxies, sector ETFs, VIX; fundamentals, quarterly statements, analyst targets, short interest | unofficial API, rate-limited; `info` fields come and go, each is validated |
-| Alpaca (paper) | market clock/calendar, snapshot cross-check | paper endpoints only, enforced in code |
+| Alpaca (paper) | market clock/calendar, snapshot cross-check, option chains and contract open interest | paper endpoints only, enforced in code; OPRA needs a signed agreement (403) → `indicative` quotes, no greeks/IV/volume, open interest settles T-1 |
 | Finnhub | earnings calendar, company news, news-tone signal | economic calendar is premium (403) → static fallback |
 | RSS (Nasdaq, Seeking Alpha, Yahoo) | market-wide headline tone | unkeyed, no published limit |
 | SEC EDGAR | Form 4 insider transactions | unkeyed but fair-access rules apply: `SEC_USER_AGENT` must carry a real contact address or the source skips itself; throttled to 5 req/s against their 10 |
@@ -157,16 +193,20 @@ graded as misses. Until a source has a record it runs at weight 1.000.
 ## Guardrails
 
 - Research only. `ALPACA_PAPER=true` is asserted at startup and the Alpaca client refuses
-  to construct otherwise; no order-placement code path exists.
+  to construct otherwise; no order-placement code path exists. The option-chain reader is
+  two read-only getters under the same rule — it can price a strike, not sell one.
 - Secrets come from env / Secret Manager only, and are never written to reports or logs.
 - Every report ends with the verbatim disclaimer from `config/report-schema.md`. Every
-  shortlisted name is appended to `journal/journal.jsonl`, and every deep verdict is
-  appended again with its rating, confidence and price target, for later outcome scoring.
+  shortlisted name is appended to `journal/journal.jsonl`, every deep verdict is appended
+  again with its rating, confidence and price target, and every options recommendation is
+  appended with the full basis behind it — credit, collateral, solved IV and delta, the
+  level it was anchored to, the open interest and its as-of date, the price basis and its
+  timestamp, and the alternatives it beat.
 
 ## Tests
 
 ```bash
-make test     # 207 tests; reference/ cookbooks are excluded from collection
+make test     # 281 tests; reference/ cookbooks are excluded from collection
 ```
 
 `pytest.ini` already sets `-q`, so pass no extra `-q` — `-qq` suppresses the

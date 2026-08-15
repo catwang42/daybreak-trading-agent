@@ -51,6 +51,14 @@ def env_int(key: str, default: int) -> int:
         return default
 
 
+def env_float(key: str, default: float) -> float:
+    raw = env(key)
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        return default
+
+
 def env_bool(key: str, default: bool = False) -> bool:
     raw = env(key).lower()
     if not raw:
@@ -153,6 +161,11 @@ class Settings:
     debate_rounds: int
     preferences: Preferences
     run_date: date
+    # Discount rate for the M4 option maths. A constant, not a fetched series:
+    # at 21-45 DTE a 100bp error in r moves a 0.25-delta put's fair value by
+    # well under a cent, so the FRED dependency would buy precision the decision
+    # cannot use. Override with RISK_FREE_RATE if the curve moves materially.
+    risk_free_rate: float = 0.045
 
     @property
     def reports_dir(self) -> Path:
@@ -201,6 +214,7 @@ def load_settings(run_date: date | None = None, env_file: Path | None = None) ->
         debate_rounds=min(env_int("DEBATE_ROUNDS", 1), 2),
         preferences=prefs,
         run_date=run_date or date.today(),
+        risk_free_rate=env_float("RISK_FREE_RATE", 0.045),
     )
 
     # Export the Vertex settings LiteLLM reads from the process environment.

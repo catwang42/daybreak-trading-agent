@@ -1,8 +1,9 @@
 """Stage orchestration — the daily scan, wired end to end.
 
 ``discovery`` screens the universe and publishes the queue; ``deep`` runs the
-ported multi-agent pipeline over that queue; ``all`` runs both in one process.
-``options`` arrives in M4.
+ported multi-agent pipeline over that queue; ``options`` screens the Alpaca
+paper option chain against each deep verdict; ``all`` runs the three in one
+process.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pandas as pd
 
@@ -40,12 +41,26 @@ from .discovery.shortlist import (
     market_commentary,
     select_with_signals,
 )
-from .journal import append_entries, entries_from_deep, entries_from_shortlist
+from .journal import (
+    append_entries,
+    entries_from_deep,
+    entries_from_options,
+    entries_from_shortlist,
+)
 from .llm import LLMGateway, TokenLedger, ledger as current_ledger, reset_ledger
+from .options.context import OptionsContext, build_options_context
+from .options.stage import run_plans
+from .options.strategist import OptionsPlan
 from .pipeline.context import DeepContext, QueuedTicker
-from .pipeline.deep import DeepResult, run_queue
-from .report.deep import render_deep_index, render_deep_report
-from .report.render import DEEP_HEADING, ReportContext, render_daily_brief
+from .pipeline.deep import DeepResult, TierCost, run_queue
+from .report.deep import OPTIONS_HEADING as DEEP_OPTIONS_HEADING, render_deep_index, render_deep_report
+from .report.options import render_options_index, render_options_section
+from .report.render import (
+    DEEP_HEADING,
+    OPTIONS_HEADING as BRIEF_OPTIONS_HEADING,
+    ReportContext,
+    render_daily_brief,
+)
 from .report.writer import replace_section, write_report
 from .signals import SignalHub, build_default_hub
 from .signals.accuracy import AccuracyReport, AccuracyTracker, realised_return
@@ -93,6 +108,40 @@ class DeepStageResult:
     seconds: float = 0.0
     degraded: DegradedTracker = field(default_factory=DegradedTracker)
     ledger: TokenLedger | None = None
+    options_context: OptionsContext | None = None
+
+
+@dataclass
+class OptionsStageResult:
+    plans: list[OptionsPlan] = field(default_factory=list)
+    report_paths: list[str] = field(default_factory=list)
+    brief_path: str = ""
+    journal_written: int = 0
+    seconds: float = 0.0
+    degraded: DegradedTracker = field(default_factory=DegradedTracker)
+    ledger: TokenLedger | None = None
+    #: One line on which feed answered — printed under the brief's table.
+    feed_note: str = ""
+    #: This stage's own spend, isolated from whatever the ledger already held —
+    #: the milestone question is "what does the overlay add", not "what did the
+    #: whole run cost".
+    cost_by_tier: dict[str, TierCost] = field(default_factory=dict)
+
+    @property
+    def cost_usd(self) -> float:
+        return sum(t.cost_usd for t in self.cost_by_tier.values())
+
+    @property
+    def calls(self) -> int:
+        return sum(t.calls for t in self.cost_by_tier.values())
+
+    @property
+    def tokens(self) -> int:
+        return sum(t.total_tokens for t in self.cost_by_tier.values())
+
+    @property
+    def proposed(self) -> int:
+        return sum(1 for p in self.plans if p.chosen is not None)
 
 
 def _session_note(alpaca: AlpacaPaper, run_date: date) -> str:
@@ -470,6 +519,13 @@ def run_deep(
         settings.journal_path,
         entries_from_deep(results, context.date, f"reports/{context.run_date}/deep"),
     )
+
+    # The options stage needs the verdicts and the levels, not the transcripts.
+    # Written here so `--stage options` can run tomorrow, or on a Saturday,
+    # against exactly the picture this run produced.
+    options_context = build_options_context(results, context.date, context.data_as_of)
+    options_context.write(report_dir)
+
     return DeepStageResult(
         results=results,
         report_paths=paths,
@@ -478,6 +534,102 @@ def run_deep(
         seconds=time.monotonic() - started,
         degraded=degraded,
         ledger=ledger,
+        options_context=options_context,
+    )
+
+
+def run_options(
+    settings: Settings,
+    *,
+    context: OptionsContext | None = None,
+    only: list[str] | None = None,
+    degraded: DegradedTracker | None = None,
+    ledger: TokenLedger | None = None,
+    patch_reports: bool = True,
+    patch_brief: bool = True,
+) -> OptionsStageResult:
+    """Screen the paper option chain against each deep verdict.
+
+    Section 6 is patched into each ``deep/<ticker>.md`` in place rather than
+    re-rendered, because the overlay depends on a verdict those files already
+    contain and re-rendering would mean re-running the deep stage. ``--stage
+    all`` leaves ``patch_brief`` off and rebuilds the brief once at the end, so
+    its footer counts this stage's tokens too.
+    """
+    started = time.monotonic()
+    degraded = degraded if degraded is not None else DegradedTracker()
+    ledger = ledger or current_ledger()
+    report_dir = settings.report_dir()
+    context = context or OptionsContext.read(report_dir)
+
+    before = {tier: TierCost(u.calls, u.prompt_tokens, u.completion_tokens, u.cost_usd)
+              for tier, u in ledger.by_tier.items()}
+    gateway = LLMGateway(settings, ledger)
+    plans, chains = run_plans(settings, context, gateway, degraded, only=only)
+    cost = {}
+    for tier, usage in ledger.by_tier.items():
+        was = before.get(tier, TierCost())
+        delta = TierCost(
+            calls=usage.calls - was.calls,
+            prompt_tokens=usage.prompt_tokens - was.prompt_tokens,
+            completion_tokens=usage.completion_tokens - was.completion_tokens,
+            cost_usd=usage.cost_usd - was.cost_usd,
+        )
+        if delta.calls:
+            cost[tier] = delta
+
+    paths: list[str] = []
+    brief_path = report_dir / "daily-brief.md"
+    if patch_reports:
+        for plan in plans:
+            deep_path = report_dir / "deep" / f"{plan.symbol}.md"
+            if not deep_path.exists():
+                degraded.add(
+                    f"Options {plan.symbol}",
+                    f"no deep report at {deep_path} to write the options view into",
+                )
+                continue
+            patched = replace_section(
+                deep_path.read_text(), DEEP_OPTIONS_HEADING, render_options_section(plan)
+            )
+            paths.append(str(write_report(deep_path, patched, settings.reports_bucket)))
+
+    if patch_brief and brief_path.exists():
+        # The footer belongs to the run that wrote the brief and cannot know
+        # about this one, so the overlay states its own spend inline — the same
+        # thing section 5 already does for the deep stage.
+        calls = sum(c.calls for c in cost.values())
+        tokens = sum(c.prompt_tokens + c.completion_tokens for c in cost.values())
+        spend = sum(c.cost_usd for c in cost.values())
+        note = (
+            f"Overlay patched in by `--stage options` on "
+            f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC} · {calls} "
+            f"{', '.join(cost) or 'no'}-tier call(s) · {tokens:,} tok · est. ${spend:.4f}, "
+            "over and above the footer total below."
+        )
+        patched = replace_section(
+            brief_path.read_text(),
+            BRIEF_OPTIONS_HEADING,
+            render_options_index(plans, chains.feed_note, note),
+        )
+        write_report(brief_path, patched, settings.reports_bucket)
+    elif patch_brief:
+        degraded.add("Daily brief", f"no brief at {brief_path} to publish the overlay into")
+
+    written = append_entries(
+        settings.journal_path,
+        entries_from_options(plans, context.date, f"reports/{context.run_date}/deep"),
+    )
+    return OptionsStageResult(
+        plans=plans,
+        report_paths=paths,
+        brief_path=str(brief_path),
+        journal_written=written,
+        seconds=time.monotonic() - started,
+        degraded=degraded,
+        ledger=ledger,
+        feed_note=chains.feed_note,
+        cost_by_tier=cost,
     )
 
 
@@ -488,8 +640,8 @@ def run_all(
     universe_limit: int | None = None,
     shortlist_size: int | None = None,
     only: list[str] | None = None,
-) -> tuple[DiscoveryResult, DeepStageResult]:
-    """Discovery then deep in one process, sharing the ledger and the brief."""
+) -> tuple[DiscoveryResult, DeepStageResult, OptionsStageResult]:
+    """Discovery, deep, then options in one process, sharing the ledger and brief."""
     discovery = run_discovery(
         settings,
         refresh_universe=refresh_universe,
@@ -503,15 +655,24 @@ def run_all(
         only=only,
         degraded=ctx.degraded,
         ledger=ctx.ledger,
-        patch_brief=False,  # re-rendered below so the footer counts the deep spend too
+        patch_brief=False,  # re-rendered below so the footer counts the later spend too
+    )
+    options = run_options(
+        settings,
+        context=deep.options_context,
+        only=only,
+        degraded=ctx.degraded,
+        ledger=ctx.ledger,
+        patch_brief=False,
     )
 
     ctx.deep_index = render_deep_index(deep.results)
+    ctx.options_index = render_options_index(options.plans, options.feed_note)
     ctx.stage = "all"
-    ctx.runtime_seconds = ctx.runtime_seconds + deep.seconds
+    ctx.runtime_seconds = ctx.runtime_seconds + deep.seconds + options.seconds
     write_report(
         settings.report_dir() / "daily-brief.md",
         render_daily_brief(ctx),
         settings.reports_bucket,
     )
-    return discovery, deep
+    return discovery, deep, options

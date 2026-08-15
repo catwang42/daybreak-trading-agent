@@ -57,6 +57,8 @@ class ReportContext:
     # Set once the deep stage has run in the same process (``--stage all``);
     # a standalone ``--stage deep`` patches this section on disk instead.
     deep_index: str | None = None
+    #: Same arrangement for section 6, set by the options stage.
+    options_index: str | None = None
 
 
 def _pct(value: float | None, digits: int = 2) -> str:
@@ -309,11 +311,16 @@ def _section_deep(ctx: ReportContext) -> str:
     )
 
 
+OPTIONS_HEADING = "## 6. Options Candidates"
+
+
 def _section_options(ctx: ReportContext) -> str:
+    if ctx.options_index is not None:
+        return f"{OPTIONS_HEADING}\n\n{ctx.options_index}\n"
     return (
-        "## 6. Options Candidates\n\n"
-        "_Not yet implemented — Milestone 4 adds cash-secured put and covered-call "
-        "candidates from Alpaca paper option chains._\n"
+        f"{OPTIONS_HEADING}\n\n"
+        "_Not run in this stage — `--stage options` screens the Alpaca paper option "
+        "chain against each deep verdict and patches this section in place._\n"
     )
 
 

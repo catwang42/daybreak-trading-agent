@@ -98,9 +98,58 @@ reasonably expect the opposite:
   forced this.
 
 ## Options mapping (staskh → src/tradingagent/options/)
-| Skill/tool | Local module | Notes |
+
+Upstream: `staskh/trading_skills` @ `658dcc1`, MIT. It is a live IBKR trading
+toolkit; we took its option maths and its short-strike selection and left the
+broker behind.
+
+| Upstream | Local | What came across |
 |---|---|---|
-| covered-call finder / CSP logic | options/strategies.py | M4; IBKR → Alpaca chains |
+| `black_scholes.py::black_scholes_price / _delta / _vega / _greeks`, `implied_volatility` | `options/black_scholes.py` | the pricing and greeks formulae, the continuous dividend yield `q`, and Newton-Raphson IV with a bisection fallback |
+| `scanner_pmcc.py::find_strike_by_delta` (l.316) | `options/strategies.py::build_candidates` | select the short strike by *delta band*, not by moneyness percentage or a fixed strike offset |
+| `scanner_pmcc.py::compute_base_score` (l.600), `compute_short_premium_score` (l.584), `compute_earnings_score` (l.506) | `options/strategies.py::score_candidate` | the additive component score with a per-component reason string, the thin-premium penalty, and earnings-before-expiry as a scoring term rather than a hard filter |
+| `broker/roll.py::evaluate_short_candidates` | `options/strategies.py::hard_filters` | the reject-before-you-score gates: ITM, delta outside band, open interest floor, spread ceiling |
+| `broker/options.py`, `options.py` | `data/option_chain.py` | OCC symbology, the DTE window, and mid-price-with-fallback quote handling |
+
+Deliberate deviations:
+
+- **IBKR → Alpaca paper, and the free feed is thinner than upstream assumes.**
+  staskh reads a live IBKR chain that carries greeks, IV, volume and open
+  interest per contract. Alpaca's free `indicative` feed returns
+  `implied_volatility=None` and `greeks=None` for every snapshot, has no volume
+  field at all, and only exposes open interest through the separate
+  `get_option_contracts` endpoint, which settles a day behind. So every delta,
+  IV and theta in section 6 is *computed by us* from the quote — the journal
+  records `"greeks_source": "computed (Black-Scholes) — the free feed supplies
+  none"` so a later review cannot mistake our number for the exchange's.
+- **Upstream's volume filter is dropped, not silently ignored.** No per-contract
+  volume exists on this tier. Open interest carries the liquidity test alone,
+  and the data-quality block says so on every report.
+- **Strikes are anchored to the deep analysis, which upstream has no concept
+  of.** staskh's scanner is standalone: it picks a delta and takes what the
+  chain gives. Ours starts from the portfolio manager's verdict and scores the
+  strike against the levels the analysts actually argued over — nearest support
+  below spot for a CSP, nearest resistance or the price target above spot for a
+  covered call. A 0.25-delta strike on the wrong side of the level is penalised
+  even though upstream would rank it first.
+- **The score does not decide.** Upstream's scanner outputs a ranked list and
+  the top row is the answer. Ours hands the top three, their component scores
+  and their data caveats to a SMART-tier strategist that must name one of them
+  by OCC symbol or say `none` — and a symbol that was not in the table is
+  treated as a hallucination, not a pick.
+- **One-sided books are priced as a seller would see them.** Far-OTM contracts
+  routinely quote bid 0.00 against a real ask. Upstream's mid would report half
+  the ask as the premium; we fall back bid → mid → last trade → prior close and
+  print which one produced the number, because a mid you cannot sell at is a
+  worse answer than an honest bid of zero.
+- **No roll logic, no position management, no order path.** `broker/roll.py`'s
+  surrounding machinery assumes open positions and an execution venue. We hold
+  no positions and place no orders; only the candidate-evaluation core came
+  across.
+- **Risk-free rate is a config constant (0.045, `RISK_FREE_RATE`), not a FRED
+  series.** At 21–45 DTE a 100bp error in `r` moves a 0.25-delta put's fair
+  value by well under a cent. The FRED dependency would buy precision the
+  decision cannot use.
 
 ## Deliberate deviations & upstream releases reviewed
 
@@ -174,3 +223,4 @@ reasonably expect the opposite:
 | CANSLIM C/A/I fundamentals | FMP or Finviz Elite | ~$40/mo | technical-only screening |
 | Live economic calendar | FMP / Finnhub premium | paid tier | static recurring schedule |
 | Industry-granularity theme detection | FINVIZ Elite | ~$40/mo | GICS sector aggregates |
+| Real-time OPRA option quotes, exchange greeks/IV, per-contract volume | Alpaca OPRA feed (agreement unsigned → 403) or IBKR | OPRA subscriber agreement + market-data fee | `indicative` feed quotes, greeks and IV computed by us, open interest from the T-1 contracts endpoint, volume unavailable |

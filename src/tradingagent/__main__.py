@@ -76,14 +76,26 @@ def main(
         typer.secho(f"Configuration refused: {exc}", fg="red", err=True)
         raise typer.Exit(2)
 
-    if stage is Stage.options:
-        typer.secho("Stage 'options' is not implemented yet (Milestone 4).", fg="yellow", err=True)
-        raise typer.Exit(1)
-
     only = [t.strip().upper() for t in tickers.split(",") if t.strip()] if tickers else None
     log.info("Stage=%s date=%s paper=%s", stage.value, settings.run_date, settings.alpaca_paper)
 
-    from .stages import run_all, run_deep, run_discovery
+    from .stages import run_all, run_deep, run_discovery, run_options
+
+    if stage is Stage.options:
+        if skip_llm:
+            typer.secho(
+                "--skip-llm makes the options strategist a no-op; nothing to run.",
+                fg="red",
+                err=True,
+            )
+            raise typer.Exit(2)
+        try:
+            options = run_options(settings, only=only)
+        except FileNotFoundError as exc:
+            typer.secho(str(exc), fg="red", err=True)
+            raise typer.Exit(2)
+        _echo_options(settings, options)
+        return
 
     if stage is Stage.deep:
         if skip_llm:
@@ -101,7 +113,7 @@ def main(
         if skip_llm:
             typer.secho("--skip-llm makes the deep stage a no-op; nothing to run.", fg="red", err=True)
             raise typer.Exit(2)
-        discovery, deep = run_all(
+        discovery, deep, options = run_all(
             settings,
             refresh_universe=refresh_universe,
             universe_limit=universe_limit,
@@ -110,6 +122,7 @@ def main(
         )
         _echo_discovery(settings, discovery)
         _echo_deep(settings, deep)
+        _echo_options(settings, options)
         return
 
     result = run_discovery(
@@ -168,6 +181,43 @@ def _echo_deep(settings, deep) -> None:
         )
     if deep.degraded.entries:
         typer.secho(f"DEGRADED: {', '.join(deep.degraded.sources)}", fg="yellow")
+
+
+def _echo_options(settings, options) -> None:
+    typer.echo("")
+    typer.secho(
+        f"Options:  {options.proposed} overlay(s) from {len(options.plans)} verdict(s) "
+        f"in {options.seconds:.1f}s",
+        fg="green",
+    )
+    for plan in options.plans:
+        chosen = plan.chosen
+        if chosen is not None:
+            detail = (
+                f"{chosen.strike:>8,.2f} {chosen.quote.expiry} · delta "
+                f"{abs(chosen.delta):.2f} · ${chosen.credit:.2f} · "
+                f"{chosen.annualized_yield_pct:.1f}% ann."
+            )
+        elif plan.candidates:
+            # Distinguishing these matters: an empty screen is a data or
+            # liquidity story, a declined screen is the strategist's judgement.
+            detail = plan.error or (
+                f"strategist declined all {len(plan.candidates)} screened candidate(s)"
+            )
+        else:
+            detail = plan.skipped or plan.error or "no candidate passed the screen"
+        strategy = {"cash-secured put": "CSP", "covered call": "CC"}.get(plan.strategy or "", "—")
+        typer.echo(f"  {plan.symbol:<6} {strategy:<4} {detail}")
+    typer.echo(f"Journal:  {options.journal_written} options entries -> {settings.journal_path}")
+    # The milestone question is what the overlay adds, so this is the stage's
+    # own spend, not the run total.
+    typer.echo(
+        f"Cost:     +{options.calls} call(s) · {options.tokens:,} tok · "
+        f"${options.cost_usd:.4f} on the "
+        f"{', '.join(options.cost_by_tier) or 'no'} tier"
+    )
+    if options.degraded.entries:
+        typer.secho(f"DEGRADED: {', '.join(options.degraded.sources)}", fg="yellow")
 
 
 if __name__ == "__main__":

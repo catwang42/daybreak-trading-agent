@@ -55,6 +55,16 @@ class SchemaViolation(LLMError):
     """Model output did not match the requested schema, twice."""
 
 
+class EmptyCompletion(LLMError):
+    """The provider answered, but with nothing in it.
+
+    Separate from :class:`LLMError` because it is a malformed *reply*, not a
+    failed call: the request was accepted, billed and accounted for. CLAUDE.md's
+    rule for malformed output is one re-prompt before DEGRADED, so the schema
+    path treats this like a validation error rather than a dead provider.
+    """
+
+
 @dataclass
 class Usage:
     """Token counters for one tier."""
@@ -178,20 +188,24 @@ class LLMGateway:
         max_tokens = max_tokens or token_budget(schema)
 
         json_prompt = f"{prompt}\n\n{_schema_instruction(schema)}"
-        raw = self._call(json_prompt, tier=tier, system=system, max_tokens=max_tokens, temperature=temperature)
         try:
+            raw = self._call(
+                json_prompt, tier=tier, system=system, max_tokens=max_tokens, temperature=temperature
+            )
             return _parse_schema(raw, schema)
-        except (ValidationError, ValueError) as first_error:
+        except (ValidationError, ValueError, EmptyCompletion) as first_error:
             log.warning(
                 "Schema violation on tier=%s (%s): %s; re-prompting once.",
                 tier,
                 schema.__name__,
                 _violation_digest(first_error),
             )
-            repair = (
-                f"{json_prompt}\n\nYour previous reply was rejected:\n{first_error}\n"
-                "Reply again with ONLY the corrected JSON object."
+            rejected = (
+                "Your previous reply was empty."
+                if isinstance(first_error, EmptyCompletion)
+                else f"Your previous reply was rejected:\n{first_error}"
             )
+            repair = f"{json_prompt}\n\n{rejected}\nReply again with ONLY the corrected JSON object."
             raw2 = self._call(repair, tier=tier, system=system, max_tokens=max_tokens, temperature=temperature)
             try:
                 return _parse_schema(raw2, schema)
@@ -256,7 +270,7 @@ class LLMGateway:
         content = _extract_text(response)
         if not content.strip():
             self.ledger.record_failure(tier)
-            raise LLMError(f"Empty completion from tier={tier} model={model}")
+            raise EmptyCompletion(f"Empty completion from tier={tier} model={model}")
         return content
 
     def _account(self, response: Any, *, tier: str, model: str) -> None:
@@ -319,6 +333,15 @@ _LIST_ITEM_CHARS = 250
 # that hits the ceiling costs a truncated reply and a `json_invalid` guess.
 _BUDGET_HEADROOM = 1.6
 _BUDGET_FLOOR = 600
+# A reasoning model spends tokens before it writes the answer, and the provider
+# charges that thinking against the same `max_tokens` ceiling. Measured on the
+# options strategist against Sonnet-class on Vertex: the same prompt returned
+# `finish_reason=length` with **no content at all** at a 1,907-token ceiling and
+# completed in 3,057 tokens at 4,000 — roughly 2,400 tokens of thinking before
+# the first brace. A ceiling sized to the JSON alone therefore buys a silent
+# empty reply, which is the most expensive failure available: a wasted call, a
+# re-prompt, and often a DEGRADED ticker. Unused ceiling is not billed.
+_REASONING_ALLOWANCE = 2500
 
 
 def _max_length(info: Any) -> int | None:
@@ -329,10 +352,11 @@ def token_budget(schema: type[BaseModel]) -> int:
     """Completion tokens enough to hold a maximal valid instance of ``schema``.
 
     Every string field is assumed to run to its cap, every list to its item
-    limit, plus the JSON scaffolding. The estimate errs high on purpose:
-    unused budget is not billed — providers charge generated tokens — so the
-    only cost of a generous ceiling is that a runaway reply runs longer before
-    it is cut off.
+    limit, plus the JSON scaffolding and :data:`_REASONING_ALLOWANCE` for the
+    thinking the model does before the first brace. The estimate errs high on
+    purpose: unused budget is not billed — providers charge generated tokens —
+    so the only cost of a generous ceiling is that a runaway reply runs longer
+    before it is cut off.
     """
     chars = 0
     for name, info in schema.model_fields.items():
@@ -344,7 +368,8 @@ def token_budget(schema: type[BaseModel]) -> int:
             chars += _max_length(info) or _UNCAPPED_STR_CHARS
         else:
             chars += 24  # numbers, enums, short literals
-    return max(_BUDGET_FLOOR, int(chars / _CHARS_PER_TOKEN * _BUDGET_HEADROOM))
+    prose = max(_BUDGET_FLOOR, int(chars / _CHARS_PER_TOKEN * _BUDGET_HEADROOM))
+    return prose + _REASONING_ALLOWANCE
 
 
 def _violation_digest(error: Exception) -> str:
