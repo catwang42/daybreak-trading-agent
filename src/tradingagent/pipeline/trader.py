@@ -39,18 +39,43 @@ def render_plan(plan: ResearchPlan | None, error: str | None = None) -> str:
     )
 
 
-def render_proposal(proposal: TraderProposal | None, error: str | None = None) -> str:
+def render_proposal(
+    proposal: TraderProposal | None, error: str | None = None, plan=None
+) -> str:
+    """The proposal as the risk committee and the manager see it.
+
+    ``plan`` is the computed arithmetic (:mod:`.trade_plan`). Passing it means
+    the risk seats critique the numbers that will be published rather than the
+    trader's description of them — the two used to be able to differ.
+    """
     if proposal is None:
         return f"The trader produced no proposal this run (DEGRADED: {error or 'unknown'})."
-    entry = f"${proposal.entry_price:,.2f}" if proposal.entry_price is not None else "not specified"
-    stop = f"${proposal.stop_loss:,.2f}" if proposal.stop_loss is not None else "not specified"
-    return (
-        f"Proposed action: **{proposal.action}**\n\n"
-        f"{proposal.reasoning}\n\n"
-        f"- Entry reference: {entry}\n"
-        f"- Stop loss: {stop}\n"
-        f"- Sizing: {proposal.position_sizing or 'not specified'}"
+    level = (
+        f"${proposal.invalidation_level:,.2f}"
+        if proposal.invalidation_level is not None
+        else "no level given"
     )
+    lines = [
+        f"Proposed action: **{proposal.action}**",
+        "",
+        proposal.reasoning,
+        "",
+        f"- Entry: {proposal.entry_type}"
+        + (f" at ${proposal.entry_level:,.2f}" if proposal.entry_level is not None else ""),
+        f"- Entry condition: {proposal.entry_condition or 'none stated'}",
+        f"- Invalidation ({proposal.invalidation_type}): {level}",
+    ]
+    if plan is not None:
+        lines += [
+            "",
+            "Computed from those levels against the run's snapshot "
+            "(this is the arithmetic that will be published):",
+            "",
+            plan.table(),
+        ]
+        if plan.failures:
+            lines += ["", f"**{plan.status}** — {'; '.join(plan.failures)}"]
+    return "\n".join(lines)
 
 
 def run_trader(

@@ -135,6 +135,38 @@ even when it falls inside the requested date.
   `date.today()` / `datetime.now()` appears outside a small reviewed allowlist (the
   `--date` default, the market-clock lookup, and the live options quotes).
 
+### Who does the arithmetic
+
+The models decide **intent**; the pipeline computes every number that follows from it.
+The trader emits a direction, an entry *type* (`market` / `pullback` / `breakout`) with an
+optional level, an invalidation *type* and level, and an entry condition in words.
+`src/tradingagent/pipeline/trade_plan.py` computes entry, stop, risk per share, risk %,
+reward:risk and the size cap from the snapshot, and section 4 prints that table with the
+rule behind each row.
+
+This split is a defect fix. One report proposed STZ at "2.5% risk"; the entry and stop it
+published were 3.6% apart — the model had quoted a figure computed against an entry
+reference that was no longer the entry. A human sizing off 2.5% would have taken 44% more
+risk than they thought.
+
+- The plan is asserted before it is published: the stop must be on the losing side of the
+  entry, risk ≤ 8% of entry, reward:risk ≥ 1.5×, and every price must trace to the same
+  snapshot. A plan that fails is published as **`NO TRADE — inconsistent plan`** with the
+  reason, in the deep report and in the brief's index — never quietly softened.
+- Size is derived, not stated: 0.5% of the portfolio at risk ÷ the stop distance, capped
+  at 10%. A tighter stop earns a bigger position; that is the only way it grows.
+- A proposed level more than 25% from the close, or on the wrong side of it for the entry
+  type given, is a level from another chart — the close is used instead and the report
+  says so under "Notes on the levels used".
+- The risk committee and the portfolio manager are shown the **computed** table, so the
+  seats argue with the numbers that will be published.
+- Afterwards the prose is read back: any risk %, stop or entry price quoted in the
+  thesis, ruling or summary that disagrees with the computed plan is printed beneath it
+  as a correction. The paragraph is left exactly as written — an edited thesis is one
+  nobody can audit — and the computed figure is the one to use.
+- The journal records the computed plan (`trade_plan`) alongside the verdict, so a later
+  review grades the arithmetic that was actually published.
+
 ### The options stage
 
 `deep` writes `reports/<date>/options-context.json` — each verdict plus the spot, the

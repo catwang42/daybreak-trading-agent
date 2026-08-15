@@ -126,22 +126,35 @@ def _proposal(result: DeepResult) -> str:
             "",
         ]
         return "\n".join(lines)
-    entry = f"${proposal.entry_price:,.2f}" if proposal.entry_price is not None else "not specified"
-    stop = f"${proposal.stop_loss:,.2f}" if proposal.stop_loss is not None else "not specified"
-    risk = ""
-    if proposal.entry_price and proposal.stop_loss and proposal.entry_price > 0:
-        risk = f" ({(1 - proposal.stop_loss / proposal.entry_price) * 100:.1f}% risk per share)"
+
+    plan = result.trade_plan
     lines += [
         f"**Action: {proposal.action}**",
         "",
         proposal.reasoning,
         "",
-        "| Field | Value |",
-        "|---|---|",
-        f"| Entry reference | {entry} |",
-        f"| Stop loss | {stop}{risk} |",
-        f"| Sizing | {proposal.position_sizing or 'not specified'} |",
-        "",
+    ]
+    if proposal.entry_condition:
+        lines += [f"**Entry condition:** {proposal.entry_condition}", ""]
+
+    if plan is None:
+        lines += ["_No trade plan was computed for this ticker._", ""]
+        return "\n".join(lines)
+
+    if not plan.actionable:
+        lines += [f"> **{plan.status}** — {'; '.join(plan.failures) or 'see below'}.", ""]
+    lines += [plan.table(), "", plan.note(), ""]
+    if plan.warnings:
+        lines += ["**Notes on the levels used:**", ""]
+        lines += [f"- {note}" for note in plan.warnings]
+        lines.append("")
+    if plan.corrections:
+        # The prose is left as written; the disagreement is printed beside it.
+        # A silently edited thesis is one nobody can audit.
+        lines += ["**Figures quoted in the prose that disagree with the computed plan:**", ""]
+        lines += [f"- {note}" for note in plan.corrections]
+        lines.append("")
+    lines += [
         "_A proposal for a human to evaluate. This tool has no order path; the Alpaca "
         "integration is paper-only and read-only._",
         "",
@@ -253,7 +266,14 @@ def render_deep_index(results: list[DeepResult]) -> str:
     lines.append("")
     for r in results:
         if r.decision is not None:
-            lines.append(f"- **{r.symbol}** — {r.decision.executive_summary}")
+            # A plan the arithmetic rejected must say so where the verdict is
+            # skimmed, not only in the deep report nobody opens.
+            flag = (
+                f" · **{r.trade_plan.status}**"
+                if r.trade_plan is not None and not r.trade_plan.actionable
+                else ""
+            )
+            lines.append(f"- **{r.symbol}** — {r.decision.executive_summary}{flag}")
         else:
             lines.append(
                 f"- **{r.symbol}** — DEGRADED: "
