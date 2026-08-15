@@ -10,7 +10,7 @@ A provider-agnostic Python application, built with Claude Code as the coding ass
 | M2 | `--stage deep` — TradingAgents debate pipeline (4 analysts → bull/bear debate → trader → risk committee → portfolio manager) | **done** |
 | M3 | signal bundle — news tone, SEC Form 4, FRED macro, Polymarket odds, plus a source-accuracy tracker | **done** |
 | M4 | `--stage options` — CSP / covered-call candidates screened off the Alpaca paper chain | **done** |
-| M5 | Cloud Run Jobs schedule + delivery | scaffolded in `deploy/` |
+| M5 | `--stage report` — email delivery, GCS persistence, Cloud Run Jobs schedule | **done** |
 
 ## Local quickstart
 
@@ -23,7 +23,7 @@ Python 3.11+ is required, and it is deliberately **not** taken from whatever
 curl -LsSf https://astral.sh/uv/install.sh | sh   # one-time, installs to ~/.local/bin
 make env                                          # uv venv --python 3.11 + pinned requirements
 cp config/.env.example config/.env                # fill free keys + LLM provider
-make test                                         # 281 tests, must be green
+make test                                         # 350 tests, must be green
 ```
 
 Then each session:
@@ -43,15 +43,17 @@ call `.venv/bin/python` directly and need no activation.
 
 Output lands in `reports/<date>/daily-brief.md`, per-ticker analyses in
 `reports/<date>/deep/<SYM>.md`, and appends to `journal/journal.jsonl` (all git-ignored;
-set `REPORTS_BUCKET` to mirror them to GCS instead).
+set `REPORTS_BUCKET` to mirror them to GCS as well). If the `SMTP_*` block is
+filled in, the brief is also emailed — see [Delivery](#delivery).
 
 ### CLI
 
 ```
-python -m tradingagent --stage all              # discovery + deep + options, one shared ledger
+python -m tradingagent --stage all              # discovery + deep + options + email, one shared ledger
                        --stage discovery        # scan, screen, shortlist, queue only
                        --stage deep             # deep-dive the queue from an earlier discovery
                        --stage options          # option overlay on an earlier deep run's verdicts
+                       --stage report           # re-send an existing day's email; no data, no LLM calls
                        --date 2026-08-13        # re-run for a past session
                        --shortlist 5            # shortlist size (default 10)
                        --limit 100              # cap universe, for quick smoke runs
@@ -122,6 +124,51 @@ feed, which carries no greeks, no IV and no per-contract volume. Open interest c
 the contracts endpoint and settles a day behind. Run outside market hours and the
 premiums are the previous session's marks — the report says which timestamp produced
 each number and how old it is.
+
+### Delivery
+
+The run ends by emailing the brief over SMTP (`src/tradingagent/delivery/email.py`).
+Subject line: `Daybreak 2026-08-14 — 3 verdicts, top: NVDA Buy`, where the top
+name is the best rating, ties broken by deep-queue order.
+
+| Part | Why |
+|---|---|
+| brief as inline HTML | the thing you actually read, on a phone, without opening an attachment. Tables get inline styles and a horizontal scroll wrapper because Gmail strips `<style>` blocks |
+| `daily-brief.md` attached | the source of truth, greppable and diffable |
+| `deep/<SYM>.md` attached | a rendered brief is already ~75 KB and Gmail clips a body over ~102 KB behind a "view entire message" link; inlining the deep reports too would hide the disclaimer |
+| plain-text alternative | the raw markdown, for clients that refuse HTML |
+
+A **DEGRADED run still sends**, with the failure in the subject
+(`… · DEGRADED: yfinance OHLCV, Finnhub +2 more`). A missing report is what
+counts as an error; a thin one is news you need at 08:00, not at 09:00.
+
+Configuration is env-only: `SMTP_HOST`, `SMTP_PORT` (587 STARTTLS / 465 TLS),
+`SMTP_USER`, `SMTP_APP_PASSWORD`, `SMTP_FROM`, `REPORT_EMAIL_TO` (comma-separated).
+Gmail requires 2-Step Verification and a 16-character App Password — the account
+password is refused. Leave `SMTP_HOST` or `REPORT_EMAIL_TO` empty and delivery
+reports itself as skipped, printing the subject it would have sent; the run still
+succeeds.
+
+`--stage report` re-sends a day's email from what is already on disk. It reads
+the verdicts back out of `options-context.json` and the degradation out of the
+brief itself, so recovering from a mail-server outage costs no market data and
+no tokens.
+
+### Persistence
+
+Cloud Run Jobs discard the container's disk on exit. With `REPORTS_BUCKET` set,
+reports upload as they are written and the journal round-trips: restored from
+`gs://<bucket>/journal/journal.jsonl` at startup, mirrored back in a `finally`
+so a run that aborted halfway still keeps what it journaled. Both directions
+merge on exact-line identity rather than overwriting, so a retry cannot
+double-count a recommendation and a concurrent execution cannot be erased.
+
+This exists for the accuracy tracker specifically. It grades each signal against
+weeks of prior journal entries, so a journal that resets nightly would leave
+every source permanently at weight 1.000 — the benchmark would silently never
+start. Bucket layout mirrors the repo, so `gsutil rsync` works in either
+direction. Every GCS call is best-effort: an outage costs the sync, not the
+local report or the run's tokens.
 
 ### LLM configuration
 
@@ -209,7 +256,7 @@ graded as misses. Until a source has a record it runs at weight 1.000.
 ## Tests
 
 ```bash
-make test     # 281 tests; reference/ cookbooks are excluded from collection
+make test     # 350 tests; reference/ cookbooks are excluded from collection
 ```
 
 `pytest.ini` already sets `-q`, so pass no extra `-q` — `-qq` suppresses the
@@ -244,7 +291,21 @@ been replaced.
 
 ## Deploy
 
-See `deploy/cloudrun.md` (recommended: Cloud Run Jobs + Cloud Scheduler) or `deploy/compute-engine.md`.
+`bash deploy/setup.sh` does the whole thing from a filled-in `config/.env`: APIs,
+Artifact Registry, GCS bucket, service account, one Secret Manager entry per
+credential, `gcloud builds submit`, the Cloud Run Job, and a Cloud Scheduler
+trigger at 08:00 ET on weekdays. It is idempotent — re-run it after any code or
+config change.
+
+Two deliberate choices worth knowing before you read the script: it deploys with
+`gcloud run jobs deploy` rather than `create`, because the `create || update
+--image` pattern silently leaves stale secrets in place; and it sets
+`--max-retries=0`, because a failed task has usually already spent its tokens
+and the default of 3 would spend them twice more. Recovering from a delivery
+failure is `--stage report`, which is free.
+
+See `deploy/cloudrun.md` for the manual equivalent and the operational notes, or
+`deploy/compute-engine.md` for the VM-and-cron alternative.
 
 ## Key docs
 

@@ -10,4 +10,6 @@
 - Options: income strategies only (cash-secured puts, covered calls); target delta 0.2–0.3; avoid holding short options through earnings
 - Shortlist size: 5–10; deep-analysis cap: 3–5/day
 ## Report delivery (Milestone 5)
-- Channel: Telegram (placeholder) — report ready by 15:00 SGT
+- Channel: email (SMTP) — the brief as HTML in the body, the markdown and the deep reports attached
+- Recipient and credentials come from env (`REPORT_EMAIL_TO`, `SMTP_*`), never from this file
+- Report ready by 15:00 SGT (the 08:00 ET schedule lands well before that)
