@@ -39,8 +39,16 @@ def brief_row(plan: OptionsPlan) -> str:
     )
 
 
-def render_options_index(plans: list[OptionsPlan], feed_note: str = "") -> str:
-    """Brief section 6."""
+def render_options_index(
+    plans: list[OptionsPlan], feed_note: str = "", cost_note: str = ""
+) -> str:
+    """Brief section 6.
+
+    ``cost_note`` is what section 5 does for the deep stage: when the overlay is
+    patched into an existing brief, the footer belongs to the run that wrote the
+    brief and does not know about this one, so the stage states its own spend
+    where the numbers it bought are printed.
+    """
     if not plans:
         return (
             "_No options overlay this run — the deep stage produced no verdicts to "
@@ -60,6 +68,8 @@ def render_options_index(plans: list[OptionsPlan], feed_note: str = "") -> str:
     ]
     if feed_note:
         lines += ["", f"_{feed_note}_"]
+    if cost_note:
+        lines += ["", f"_{cost_note}_"]
     return "\n".join(lines)
 
 

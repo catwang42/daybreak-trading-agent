@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pandas as pd
 
@@ -595,10 +595,22 @@ def run_options(
             paths.append(str(write_report(deep_path, patched, settings.reports_bucket)))
 
     if patch_brief and brief_path.exists():
+        # The footer belongs to the run that wrote the brief and cannot know
+        # about this one, so the overlay states its own spend inline — the same
+        # thing section 5 already does for the deep stage.
+        calls = sum(c.calls for c in cost.values())
+        tokens = sum(c.prompt_tokens + c.completion_tokens for c in cost.values())
+        spend = sum(c.cost_usd for c in cost.values())
+        note = (
+            f"Overlay patched in by `--stage options` on "
+            f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC} · {calls} "
+            f"{', '.join(cost) or 'no'}-tier call(s) · {tokens:,} tok · est. ${spend:.4f}, "
+            "over and above the footer total below."
+        )
         patched = replace_section(
             brief_path.read_text(),
             BRIEF_OPTIONS_HEADING,
-            render_options_index(plans, chains.feed_note),
+            render_options_index(plans, chains.feed_note, note),
         )
         write_report(brief_path, patched, settings.reports_bucket)
     elif patch_brief:

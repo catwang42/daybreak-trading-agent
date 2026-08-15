@@ -216,6 +216,15 @@ def test_the_brief_index_counts_the_overlays_it_actually_proposes():
     assert "| VZ |" in index
 
 
+def test_the_patched_index_states_the_spend_the_footer_cannot_know_about():
+    """`--stage options` patches a brief whose footer predates the overlay."""
+    index = render_options_index(
+        [plan_with_candidates()], "indicative feed", "3 smart-tier call(s) · est. $0.0822"
+    )
+    assert "est. $0.0822" in index
+    assert "indicative feed" in index
+
+
 def test_the_deep_section_prints_the_screen_even_when_the_strategist_failed():
     plan = plan_with_candidates()
     plan.error = "upstream refused"

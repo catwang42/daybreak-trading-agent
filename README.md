@@ -23,7 +23,7 @@ Python 3.11+ is required, and it is deliberately **not** taken from whatever
 curl -LsSf https://astral.sh/uv/install.sh | sh   # one-time, installs to ~/.local/bin
 make env                                          # uv venv --python 3.11 + pinned requirements
 cp config/.env.example config/.env                # fill free keys + LLM provider
-make test                                         # 279 tests, must be green
+make test                                         # 281 tests, must be green
 ```
 
 Then each session:
@@ -206,7 +206,7 @@ graded as misses. Until a source has a record it runs at weight 1.000.
 ## Tests
 
 ```bash
-make test     # 279 tests; reference/ cookbooks are excluded from collection
+make test     # 281 tests; reference/ cookbooks are excluded from collection
 ```
 
 `pytest.ini` already sets `-q`, so pass no extra `-q` — `-qq` suppresses the
