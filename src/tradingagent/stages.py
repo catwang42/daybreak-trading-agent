@@ -90,12 +90,18 @@ def build_signal_hub(
 
     Rescoring is weekly (see :mod:`tradingagent.signals.accuracy`), so most runs
     load the cached weights and download nothing. A run that cannot score — no
-    journal history yet — leaves every source at weight 1.0 rather than
-    guessing.
+    journal history yet — leaves every source shadowed at weight 0 rather than
+    granting it the benefit of the doubt.
     """
     tracker = AccuracyTracker(settings.journal_path)
     report = tracker.current(settings.run_date, realised=realised_return(market))
-    hub = build_default_hub(finnhub, degraded=degraded, weights=report.weights())
+    hub = build_default_hub(
+        finnhub, degraded=degraded, weights=report.weights(), caps=report.caps()
+    )
+    log.info(
+        "Signal sources with earned ranking influence: %s",
+        ", ".join(report.graduated) or "none (all shadowed)",
+    )
     return hub, report
 
 
@@ -240,6 +246,7 @@ def build_deep_context(
                 signal_block=entry.signals.ticker_block() if entry.signals else "",
                 signal_readings=entry.signals.readings() if entry.signals else {},
                 signal_adjustment=round(entry.score_adjustment, 2),
+                signal_shadow_adjustment=round(entry.shadow_adjustment, 2),
                 screener={
                     "score": c.score,
                     "rating": c.rating,
@@ -443,6 +450,7 @@ def run_discovery(
         signal_rows=hub.source_rows(),
         signal_backdrop=hub.market_block(),
         signal_accuracy=accuracy.markdown(),
+        signal_shadow=hub.shadow,
     )
     markdown = render_daily_brief(context)
     path = write_report(settings.report_dir() / "daily-brief.md", markdown, settings.reports_bucket)

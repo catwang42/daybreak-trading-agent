@@ -131,6 +131,36 @@ def test_report_survives_a_completely_empty_shortlist():
     assert DISCLAIMER in md
 
 
+def test_the_brief_says_the_signal_layer_is_shadowed_and_what_it_wanted(tmp_path):
+    """A reader must be able to tell, without reading the code, that the
+    signals in section 4 picked nothing — and what they would have picked."""
+    from tradingagent.signals.base import Signal
+    from tradingagent.signals.bundle import ShadowRanking, SignalBundle
+
+    run = date(2026, 8, 14)
+    keen = ShortlistEntry(
+        candidate=candidate("DDD", 78), take=None, earnings_flag="—", news_headline=None,
+        degraded_reason="LLM disabled", screen_rank=4,
+        signals=SignalBundle(
+            symbol="DDD", run_date=run,
+            ticker_signals=[Signal(source="insider_form4", kind="buy", direction=1, strength=1.0,
+                                   headline="cluster buy", as_of=run, symbol="DDD")],
+        ),
+    )
+    ctx = context(shortlist=[keen])
+    ctx.signal_rows = [("insider_form4", "SEC Form 4", "1 signal(s)")]
+    ctx.signal_shadow = ShadowRanking(
+        size=1, chosen=["AAA"], shadow=["DDD"], adjustments={"DDD": 8.0}
+    )
+    md = render_daily_brief(ctx)
+
+    assert "**SHADOW — the signal layer does not pick names.**" in md
+    assert "SHADOW — would have changed: in DDD / out AAA." in md
+    # The applied column is the honest zero; the shadow column is the claim.
+    assert "| **DDD** | 78 | 4 | +0.0 | +8.0 |" in md
+    assert "20 resolved directional calls" in md
+
+
 # --- journal ------------------------------------------------------------
 
 

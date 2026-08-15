@@ -13,10 +13,16 @@ Fusion rule, stated plainly because it decides what the human sees:
   equally and change no ordering. They go into the prompts as context instead.
 - Each source's contribution is ``direction × strength × weight``, where the
   weight comes from :mod:`tradingagent.signals.accuracy` — a source earns its
-  influence from the journal or loses it.
-- The total is clamped. A signal layer that can override the price screen is
-  a different product; this one is allowed to reorder a shortlist, not
-  rewrite it.
+  influence from the journal or has none.
+- The total is clamped to what the *sources that fired* have earned. A source
+  with no resolved record is worth zero points, so with today's journal every
+  bundle adjusts by 0.0 and the shortlist is the price screener's alone.
+  What the layer *would* have done is still computed and reported, as
+  :meth:`SignalBundle.shadow_adjustment`.
+
+The shadow half is not decoration. Gate 3 asks whether these sources change
+decisions or just burn tokens, and that question can only be answered by
+recording what they wanted to do while they were not allowed to do it.
 """
 
 from __future__ import annotations
@@ -26,15 +32,16 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from ..data.validate import DegradedTracker
+from .accuracy import PROVEN_MAX_ADJUSTMENT
 from .base import DIRECTION_WORD, Signal, SignalSource, SourceResult
 
 log = logging.getLogger(__name__)
 
-#: Most a fused signal set may move one candidate's screener score, in points.
-#: The screener's own range is 0-100 and its spread across a day's pool is
-#: typically 30-40 points, so this can promote a name a few places, not to the
-#: top. Deliberately conservative until the accuracy tracker has a verdict.
-MAX_SCORE_ADJUSTMENT = 8.0
+#: Ceiling on any fused signal set, in screener points, reachable only by a
+#: source a human has marked proven. The screener's own range is 0-100 and its
+#: spread across a day's pool is typically 30-40 points, so even this can
+#: promote a name a few places, not to the top.
+MAX_SCORE_ADJUSTMENT = PROVEN_MAX_ADJUSTMENT
 
 
 @dataclass
@@ -46,23 +53,74 @@ class SignalBundle:
     ticker_signals: list[Signal] = field(default_factory=list)
     market_signals: list[Signal] = field(default_factory=list)
     weights: dict[str, float] = field(default_factory=dict)
+    #: Source -> points it has earned the right to move a score by. Absent
+    #: means zero: a source nobody has graded moves nothing.
+    caps: dict[str, float] = field(default_factory=dict)
     skipped: dict[str, str] = field(default_factory=dict)
 
     def weight_for(self, source: str) -> float:
-        return self.weights.get(source, 1.0)
+        """A source's multiplier. Unknown means untested, and untested is 0.
+
+        Defaulting to 1.0 here was the cold-start bug: it made "never checked"
+        indistinguishable from "checked and average", and every new source
+        arrived with full authority over the shortlist.
+        """
+        return self.weights.get(source, 0.0)
+
+    def cap_for(self, source: str) -> float:
+        return self.caps.get(source, 0.0)
 
     @property
     def sources_present(self) -> list[str]:
         return sorted({s.source for s in self.ticker_signals + self.market_signals})
 
+    @property
+    def max_adjustment(self) -> float:
+        """The furthest today's firing sources may move this candidate.
+
+        The most-graduated source that fired sets the ceiling, so one earned
+        source is not held back by an untested one firing beside it.
+        """
+        return max((self.cap_for(s.source) for s in self.ticker_signals), default=0.0)
+
+    @property
+    def is_shadow(self) -> bool:
+        """True when the layer had a view but has not earned the right to act."""
+        return bool(self.ticker_signals) and self.max_adjustment == 0.0
+
+    def _fuse(self, cap: float, weight_of) -> float:
+        raw = sum(s.signed_strength * weight_of(s.source) for s in self.ticker_signals)
+        scaled = raw * cap / max(1.0, len(self.ticker_signals))
+        clamped = max(-cap, min(cap, scaled))
+        # `+ 0.0` collapses -0.0, which formats as "-0.0" and reads in a report
+        # as a bearish nudge rather than as nothing at all.
+        return clamped + 0.0
+
     def score_adjustment(self) -> float:
-        """Points to add to this candidate's screener score, clamped."""
-        raw = sum(s.signed_strength * self.weight_for(s.source) for s in self.ticker_signals)
-        scaled = raw * MAX_SCORE_ADJUSTMENT / max(1.0, len(self.ticker_signals))
-        return max(-MAX_SCORE_ADJUSTMENT, min(MAX_SCORE_ADJUSTMENT, scaled))
+        """Points to add to this candidate's screener score, clamped.
+
+        0.0 for every source that has not graduated, which is currently all of
+        them — see :mod:`tradingagent.signals.accuracy`.
+        """
+        return self._fuse(self.max_adjustment, self.weight_for)
+
+    def shadow_adjustment(self) -> float:
+        """What :meth:`score_adjustment` would return under full trust.
+
+        The counterfactual the old code shipped as fact: every source at
+        weight 1.0 against the proven ceiling. Reported, never applied.
+        """
+        return self._fuse(MAX_SCORE_ADJUSTMENT, lambda _source: 1.0)
 
     def net_direction(self) -> int:
-        adjustment = self.score_adjustment()
+        """The layer's directional read, shadow or not.
+
+        Deliberately taken from the shadow figure: this feeds the journal and
+        the prompts, and a source whose weight is zero still held a view worth
+        grading later. It does not move the ranking — only
+        :meth:`score_adjustment` does that.
+        """
+        adjustment = self.shadow_adjustment()
         return 1 if adjustment > 0.5 else -1 if adjustment < -0.5 else 0
 
     def readings(self) -> dict[str, int]:
@@ -81,15 +139,22 @@ class SignalBundle:
             source: 1 if total > 0 else -1 if total < 0 else 0 for source, total in totals.items()
         }
 
+    def effect_note(self) -> str:
+        """How this bundle's arithmetic ended up, in the report's words."""
+        if not self.ticker_signals:
+            return "no ticker-level signals"
+        if self.is_shadow:
+            return f"SHADOW — would have changed: {self.shadow_adjustment():+.1f} pts"
+        return f"{self.score_adjustment():+.1f} pts (shadow {self.shadow_adjustment():+.1f})"
+
     def summary(self) -> str:
         """One line for the shortlist table."""
         if not self.ticker_signals:
             return "no ticker-level signals"
-        adjustment = self.score_adjustment()
         parts = [
             f"{s.source} {DIRECTION_WORD[s.direction]} {s.strength:.2f}" for s in self.ticker_signals
         ]
-        return f"{'; '.join(parts)} → {adjustment:+.1f} pts"
+        return f"{'; '.join(parts)} → {self.effect_note()}"
 
     def ticker_block(self) -> str:
         """The per-ticker half of the signal layer, plus what failed to report.
@@ -105,7 +170,23 @@ class SignalBundle:
                 out.append(signal.line())
                 if signal.detail:
                     out.append(signal.detail)
-            out += ["", f"Net effect on today's ranking: {self.score_adjustment():+.1f} points."]
+            if self.is_shadow:
+                out += [
+                    "",
+                    "**SHADOW — would have changed: "
+                    f"{self.shadow_adjustment():+.1f} points.** No source above has resolved "
+                    "enough journal outcomes to earn ranking influence, so the actual effect on "
+                    "today's ranking is 0.0 points and this name is here on price action alone. "
+                    "Read the readings as one more opinion, not as evidence that has been "
+                    "checked against anything.",
+                ]
+            else:
+                out += [
+                    "",
+                    f"Net effect on today's ranking: {self.score_adjustment():+.1f} points "
+                    f"(capped at ±{self.max_adjustment:.0f} by what these sources have earned; "
+                    f"under full trust it would be {self.shadow_adjustment():+.1f}).",
+                ]
         else:
             out.append("- No ticker-level signals fired for this name today.")
         if self.skipped:
@@ -115,6 +196,48 @@ class SignalBundle:
     def prompt_block(self) -> str:
         """Ticker signals and the market backdrop together, for a standalone prompt."""
         return "\n".join([self.ticker_block(), "", market_block(self.market_signals)])
+
+
+@dataclass
+class ShadowRanking:
+    """The shortlist the signal layer wanted, beside the one it got.
+
+    Gate 3 needs a number, not an assurance. Recording which names the layer
+    would have promoted — while it promoted none — is what turns "the signals
+    are shadowed" into a claim someone can check in a month, against outcomes,
+    before deciding whether to graduate a source.
+    """
+
+    size: int
+    #: Symbols actually shortlisted, in screener order.
+    chosen: list[str] = field(default_factory=list)
+    #: Symbols the layer would have shortlisted, in its own order.
+    shadow: list[str] = field(default_factory=list)
+    #: Symbol -> the shadow adjustment that produced that order.
+    adjustments: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def would_promote(self) -> list[str]:
+        return [s for s in self.shadow if s not in self.chosen]
+
+    @property
+    def would_drop(self) -> list[str]:
+        return [s for s in self.chosen if s not in self.shadow]
+
+    @property
+    def would_reorder(self) -> bool:
+        return self.chosen != self.shadow
+
+    def note(self) -> str:
+        """One sentence for the report and the log."""
+        if not self.would_reorder:
+            return "SHADOW — would have changed: nothing; the layer agreed with the screener."
+        swaps = (
+            f"in {', '.join(self.would_promote)} / out {', '.join(self.would_drop)}"
+            if self.would_promote
+            else "the order only"
+        )
+        return f"SHADOW — would have changed: {swaps}."
 
 
 def market_block(signals: list[Signal]) -> str:
@@ -159,11 +282,16 @@ class SignalHub:
         sources: list[SignalSource],
         degraded: DegradedTracker | None = None,
         weights: dict[str, float] | None = None,
+        caps: dict[str, float] | None = None,
     ):
         self.sources = sources
         self.degraded = degraded if degraded is not None else DegradedTracker()
         self.weights = weights or {}
+        self.caps = caps or {}
         self.results: list[SourceResult] = []
+        #: Filled in by the shortlist selector: what the layer would have done
+        #: to today's ranking if its sources had earned the right to act.
+        self.shadow: "ShadowRanking | None" = None
 
     def collect(self, symbols: list[str], run_date: date) -> None:
         self.results = [source.fetch(symbols, run_date) for source in self.sources]
@@ -188,6 +316,7 @@ class SignalHub:
             ticker_signals=[s for s in signals if s.symbol == symbol],
             market_signals=[s for s in signals if s.symbol is None],
             weights=self.weights,
+            caps=self.caps,
             skipped=self.skipped,
         )
 
@@ -218,6 +347,7 @@ def build_default_hub(
     finnhub,
     degraded: DegradedTracker | None = None,
     weights: dict[str, float] | None = None,
+    caps: dict[str, float] | None = None,
 ) -> SignalHub:
     """The four Milestone 3 sources.
 
@@ -242,4 +372,5 @@ def build_default_hub(
         ],
         degraded=tracker,
         weights=weights,
+        caps=caps,
     )

@@ -231,11 +231,17 @@ class Evidence:
             )
         )
         rows.append(("Screener (this run)", "momentum-burst metrics", self.run_date.isoformat()))
+        shadowed = self.queued.signal_adjustment == 0.0
         for source in sorted(self.queued.signal_readings):
             rows.append(
                 (
-                    f"Signal: {source}",
-                    f"direction {self.queued.signal_readings[source]:+d} at decision time",
+                    f"Signal: {source}" + (" (SHADOW)" if shadowed else ""),
+                    f"direction {self.queued.signal_readings[source]:+d} at decision time"
+                    + (
+                        " — ungraded source, contributed 0 ranking points"
+                        if shadowed
+                        else ""
+                    ),
                     self.run_date.isoformat(),
                 )
             )

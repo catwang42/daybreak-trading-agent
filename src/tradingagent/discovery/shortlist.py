@@ -19,6 +19,7 @@ from ..data.validate import DegradedTracker
 from ..llm import LLMError, LLMGateway
 from ..pipeline.prompts_loader import render
 from ..signals import SignalBundle, SignalHub
+from ..signals.bundle import ShadowRanking
 from .breadth import BreadthResult
 from .calendar import CalendarView, earnings_within
 from .screener import Candidate
@@ -70,7 +71,17 @@ class ShortlistEntry:
 
     @property
     def score_adjustment(self) -> float:
+        """What the signal layer was actually allowed to contribute."""
         return self.signals.score_adjustment() if self.signals else 0.0
+
+    @property
+    def shadow_adjustment(self) -> float:
+        """What it would have contributed at full trust. Reported, not applied."""
+        return self.signals.shadow_adjustment() if self.signals else 0.0
+
+    @property
+    def is_shadow(self) -> bool:
+        return bool(self.signals and self.signals.is_shadow)
 
     @property
     def adjusted_score(self) -> float:
@@ -250,12 +261,19 @@ def select_with_signals(
 ) -> list[tuple[Candidate, SignalBundle | None, int]]:
     """Choose the ``size`` names worth spending quick-take tokens on.
 
-    Returns ``(candidate, bundle, screen_rank)`` in signal-adjusted order.
-    ``screen_rank`` is the name's 1-based place on screener score alone, so a
-    later reader can see which names the signals moved and by how much.
+    Returns ``(candidate, bundle, screen_rank)``. ``screen_rank`` is the name's
+    1-based place on screener score alone.
 
-    With no hub this is the old behaviour — the top ``size`` by screener score,
-    untouched.
+    Membership is decided by ``candidate.score + bundle.score_adjustment()``,
+    and that adjustment is zero for every source that has not resolved enough
+    journal outcomes to graduate (:mod:`tradingagent.signals.accuracy`). With
+    today's record that is all of them, so this is the screener's own top
+    ``size`` — by arithmetic rather than by special case, so the mechanism
+    resumes on its own the day a source earns its weight.
+
+    The signals still run over the wider pool: the counterfactual ordering is
+    recorded on ``hub.shadow`` for the report, because a layer that is never
+    measured can never be graduated.
     """
     screen_rank = {c.symbol: i + 1 for i, c in enumerate(candidates)}
     if hub is None:
@@ -265,14 +283,24 @@ def select_with_signals(
     hub.collect([c.symbol for c in pool], run_date)
     scored = [(c, hub.bundle(c.symbol, run_date)) for c in pool]
     # Stable within a tie so the screener's own ordering still decides when the
-    # signal layer has nothing to say.
+    # signal layer has nothing to say — which, while every source is shadowed,
+    # is always.
     scored.sort(key=lambda pair: pair[0].score + pair[1].score_adjustment(), reverse=True)
     chosen = [(c, b, screen_rank[c.symbol]) for c, b in scored[:size]]
+
+    shadow = sorted(scored, key=lambda pair: pair[0].score + pair[1].shadow_adjustment(), reverse=True)
+    hub.shadow = ShadowRanking(
+        size=size,
+        chosen=[c.symbol for c, _, _ in chosen],
+        shadow=[c.symbol for c, _ in shadow[:size]],
+        adjustments={c.symbol: round(b.shadow_adjustment(), 2) for c, b in scored},
+    )
     promoted = [c.symbol for c, _, rank in chosen if rank > size]
     if promoted:
         log.info(
             "Signal layer promoted %s into the shortlist over screener order", ", ".join(promoted)
         )
+    log.info("Signal layer %s", hub.shadow.note())
     return chosen
 
 

@@ -54,8 +54,13 @@ class QueuedTicker:
     #: source name -> -1/0/+1 as read at decision time. The journal records this
     #: so `signals.accuracy` can grade each source against the realised move.
     signal_readings: dict[str, int] = field(default_factory=dict)
-    #: Points the signal layer added to this name's screener score.
+    #: Points the signal layer actually added to this name's screener score.
+    #: Zero while every source is shadowed (M6 item 1).
     signal_adjustment: float = 0.0
+    #: What it would have added at full trust. Kept beside the applied figure
+    #: so the deep stage inherits the same shadow/applied distinction the brief
+    #: shows, rather than reading 0.0 and concluding the layer said nothing.
+    signal_shadow_adjustment: float = 0.0
 
     def screener_markdown(self) -> str:
         if not self.screener:

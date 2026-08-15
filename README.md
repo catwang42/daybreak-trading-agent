@@ -165,8 +165,8 @@ double-count a recommendation and a concurrent execution cannot be erased.
 
 This exists for the accuracy tracker specifically. It grades each signal against
 weeks of prior journal entries, so a journal that resets nightly would leave
-every source permanently at weight 1.000 — the benchmark would silently never
-start. Bucket layout mirrors the repo, so `gsutil rsync` works in either
+every source permanently at weight 0 — no source could ever graduate out of
+shadow. Bucket layout mirrors the repo, so `gsutil rsync` works in either
 direction. Every GCS call is best-effort: an outage costs the sync, not the
 local report or the run's tokens.
 
@@ -224,11 +224,11 @@ the prompts or the accuracy tracker.
 
 The bundle acts in two places, and deliberately nowhere else:
 
-- **Ranking.** Ticker-level signals adjust the screener score by at most ±8 points, so
-  they can promote a name a few places but never override the price screen. The shortlist
-  scores twice as many candidates as it keeps, which is what lets a signal pull a name up
-  from below the cut. Report section 4 shows every adjustment and the rank each name would
-  have had on the screener score alone.
+- **Ranking — currently SHADOW, contributing zero.** Ticker-level signals may adjust the
+  screener score, but only after the source has earned it. See below; today no source has,
+  so the shortlist is the price screener's top *n* and nothing else. The shortlist still
+  scores twice as many candidates as it keeps, and report section 4 shows both the applied
+  adjustment (0.0) and the shadow adjustment — the promotion the layer would have made.
 - **Prompts.** Ticker signals reach the news and sentiment analysts inside the evidence
   pack; the market-wide backdrop goes into the shared market context every role sees.
   Market-wide signals never touch the ranking — they shift all candidates equally, so
@@ -236,9 +236,27 @@ The bundle acts in two places, and deliberately nowhere else:
 
 Each source's direction is recorded in the journal *before* the outcome is known, which is
 what lets `signals/accuracy.py` grade it later: rolling hit rate over 90 days, rescored
-weekly, mapped to a 0.5–1.5 weight and shrunk towards 1.0 while the sample is thin.
-Abstentions are not scored, and moves inside a ±1% dead band are dropped rather than
-graded as misses. Until a source has a record it runs at weight 1.000.
+weekly, mapped to a 0.5–1.5 weight. Abstentions are not scored, and moves inside a ±1%
+dead band are dropped rather than graded as misses.
+
+**The cold start is inverted, deliberately.** A source with no record used to arrive at
+weight 1.000 — full trust — so "we have never checked this" and "this is reliably average"
+produced the same number, and four of ten names on a recent shortlist entered on signals
+nobody had graded once. A source now starts at weight 0 and earns influence on a ladder:
+
+| Resolved directional calls | Most it may move a screener score |
+|---:|---|
+| 0–19 | 0 points — SHADOW |
+| 20 | ±1 |
+| 50 | ±3 |
+| 100 | ±5 |
+| 100 + `"proven": true` in `journal/source-accuracy.json` | ±8 |
+
+`proven` is the one field in that file a human writes; no code path sets it, and a weekly
+rescore carries it forward rather than clearing it. Everything else about a shadowed
+source is unchanged — it is still fetched, scored, journaled, shown in the report and
+handed to the prompts, because a source that is never measured can never graduate. What it
+loses is the vote.
 
 ## Guardrails
 
