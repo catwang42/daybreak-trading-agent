@@ -65,16 +65,40 @@ class FinnhubFree:
             self._client = finnhub.Client(api_key=self._key)
         return self._client
 
-    def earnings_calendar(self, start: date, end: date) -> list[EarningsEvent]:
-        if not self.enabled:
+    def earnings_calendar(self, start: date, end: date, symbol: str = "") -> list[EarningsEvent]:
+        """Earnings dates in a window; ``symbol`` narrows the pull to one name.
+
+        A market-wide pull that comes back empty is degraded — the window
+        always contains *someone's* results. A single-symbol pull that comes
+        back empty is the answer: that company does not report in this window.
+        """
+        events = self._earnings(start, end, symbol)
+        if events is None:
             return []
+        if not events and not symbol:
+            self.degraded.add("Finnhub earnings calendar", f"no events {start}..{end}")
+        return events
+
+    def earnings_for(self, symbol: str, start: date, end: date) -> list[EarningsEvent] | None:
+        """Per-symbol earnings, or ``None`` when the source could not be read.
+
+        The options stage needs that distinction: "no print before expiry" and
+        "we could not check" are different facts about a sold option, and the
+        second must never be scored as the first.
+        """
+        return self._earnings(start, end, symbol)
+
+    def _earnings(self, start: date, end: date, symbol: str) -> list[EarningsEvent] | None:
+        if not self.enabled:
+            return None
+        label = f"Finnhub earnings calendar{f' {symbol}' if symbol else ''}"
         try:
             payload = self._get_client().earnings_calendar(
-                _from=start.isoformat(), to=end.isoformat(), symbol=""
+                _from=start.isoformat(), to=end.isoformat(), symbol=symbol
             )
         except Exception as exc:  # noqa: BLE001
-            self.degraded.add("Finnhub earnings calendar", str(exc))
-            return []
+            self.degraded.add(label, str(exc))
+            return None
 
         events: list[EarningsEvent] = []
         for row in (payload or {}).get("earningsCalendar", []):
@@ -82,20 +106,18 @@ class FinnhubFree:
                 when = date.fromisoformat(str(row.get("date")))
             except (TypeError, ValueError):
                 continue
-            symbol = str(row.get("symbol", "")).strip().upper()
-            if not symbol:
+            ticker = str(row.get("symbol", "")).strip().upper()
+            if not ticker:
                 continue
             events.append(
                 EarningsEvent(
-                    symbol=symbol,
+                    symbol=ticker,
                     date=when,
                     hour=str(row.get("hour") or "").lower(),
                     eps_estimate=_num(row.get("epsEstimate")),
                     revenue_estimate=_num(row.get("revenueEstimate")),
                 )
             )
-        if not events:
-            self.degraded.add("Finnhub earnings calendar", f"no events {start}..{end}")
         return events
 
     def economic_calendar(self, start: date, end: date) -> list[dict]:

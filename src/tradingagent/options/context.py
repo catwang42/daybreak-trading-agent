@@ -1,0 +1,182 @@
+"""The handoff between the deep stage and the options stage.
+
+Same pattern, and the same reason, as
+:mod:`tradingagent.pipeline.context`: ``--stage all`` passes this in memory,
+while a standalone ``--stage options`` reads the JSON the deep stage left in the
+report directory. Without it the options stage would have to re-run twelve LLM
+calls per ticker to learn a rating it already wrote down.
+
+Only what the overlay needs is persisted: the verdict, the levels the strikes
+are anchored to, and the spot price the greeks are solved against. Rerunning the
+options stage against yesterday's file therefore reproduces yesterday's strike
+selection against today's chain — which is exactly what you want on a Saturday.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import asdict, dataclass, field
+from datetime import date
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+CONTEXT_FILENAME = "options-context.json"
+SCHEMA_VERSION = 1
+
+
+@dataclass
+class VerdictRow:
+    """One ticker's portfolio-manager verdict, plus the levels a strike needs."""
+
+    symbol: str
+    name: str = ""
+    rating: str = "DEGRADED"
+    confidence: str = ""
+    price_target: float | None = None
+    time_horizon: str | None = None
+    executive_summary: str = ""
+    invalidation: str = ""
+    spot: float | None = None
+    #: Named price levels, e.g. {"50-day SMA": 31.84}. Names are printed in the
+    #: report, so they are written the way a human would say them.
+    levels: dict[str, float | None] = field(default_factory=dict)
+    #: The rendered price block the deep roles argued over, reused verbatim so
+    #: the strategist anchors to the same levels the equity thesis did.
+    price_context: str = ""
+    earnings_note: str = ""
+    #: Percentage points, as yfinance reports it (see data/fundamentals.py).
+    dividend_yield_pct: float | None = None
+    degraded: bool = False
+
+
+@dataclass
+class OptionsContext:
+    run_date: str
+    data_as_of: str = "unknown"
+    verdicts: list[VerdictRow] = field(default_factory=list)
+    version: int = SCHEMA_VERSION
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), indent=2, sort_keys=False)
+
+    @classmethod
+    def from_json(cls, text: str) -> OptionsContext:
+        raw = json.loads(text)
+        version = int(raw.get("version", 0))
+        if version != SCHEMA_VERSION:
+            raise ValueError(
+                f"options context is schema v{version}, this build expects "
+                f"v{SCHEMA_VERSION}; re-run the deep stage"
+            )
+        verdicts = [VerdictRow(**item) for item in raw.get("verdicts", [])]
+        return cls(**{**raw, "verdicts": verdicts})
+
+    def write(self, directory: Path) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / CONTEXT_FILENAME
+        path.write_text(self.to_json())
+        return path
+
+    @classmethod
+    def read(cls, directory: Path) -> OptionsContext:
+        path = directory / CONTEXT_FILENAME
+        if not path.exists():
+            raise FileNotFoundError(
+                f"No options context at {path}. Run `--stage deep` for this date "
+                f"first, or use `--stage all`."
+            )
+        return cls.from_json(path.read_text())
+
+    @property
+    def date(self) -> date:
+        return date.fromisoformat(self.run_date)
+
+    def select(self, only: list[str] | None = None) -> list[VerdictRow]:
+        if not only:
+            return list(self.verdicts)
+        wanted = {s.strip().upper() for s in only if s.strip()}
+        return [v for v in self.verdicts if v.symbol.upper() in wanted]
+
+
+# Which indicators become strike anchors, and what to call them in the report.
+# Deliberately the same levels the deep pipeline already reasoned over: an
+# overlay anchored to a level the equity thesis never mentioned is a second,
+# unexplained opinion.
+LEVEL_LABELS: list[tuple[str, str]] = [
+    ("close_50_sma", "50-day SMA"),
+    ("close_200_sma", "200-day SMA"),
+    ("boll_lb", "Bollinger lower band"),
+    ("boll_ub", "Bollinger upper band"),
+]
+
+
+def levels_from(result) -> dict[str, float | None]:
+    """Pull the strike anchors out of a finished :class:`DeepResult`.
+
+    Kept here rather than in the deep pipeline because these are the options
+    stage's requirements, and the deep stage should not have to know them.
+    """
+    levels: dict[str, float | None] = {}
+    evidence = getattr(result, "evidence", None)
+    indicators = getattr(evidence, "indicators", None)
+    if indicators is not None:
+        for key, label in LEVEL_LABELS:
+            value = indicators.get(key)
+            if value:
+                levels[label] = float(value)
+        atr = indicators.get("atr")
+        if atr:
+            levels["2-ATR band"] = float(indicators.close) - 2 * float(atr)
+
+    screener = getattr(result.queued, "screener", {}) or {}
+    for key, label in (("stop_ref", "screener stop reference"), ("entry_ref", "screener entry reference")):
+        try:
+            value = float(screener.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            levels[label] = value
+
+    decision = getattr(result, "decision", None)
+    target = getattr(decision, "price_target", None)
+    if target:
+        levels["portfolio manager price target"] = float(target)
+    return levels
+
+
+def build_options_context(results, run_date: date, data_as_of: str = "unknown") -> OptionsContext:
+    """Freeze what the options stage needs out of a finished deep run.
+
+    Tickers whose deep dive produced no verdict are carried with
+    ``rating="DEGRADED"`` rather than dropped: the options stage then reports
+    "no overlay, the equity analysis degraded" instead of leaving a name
+    silently absent from section 6.
+    """
+    rows: list[VerdictRow] = []
+    for result in results:
+        decision = getattr(result, "decision", None)
+        evidence = getattr(result, "evidence", None)
+        fundamentals = getattr(evidence, "fundamentals", None)
+        rows.append(
+            VerdictRow(
+                symbol=result.symbol,
+                name=result.queued.name or result.symbol,
+                rating=decision.rating if decision else "DEGRADED",
+                confidence=decision.confidence if decision else "",
+                price_target=decision.price_target if decision else None,
+                time_horizon=decision.time_horizon if decision else None,
+                executive_summary=decision.executive_summary if decision else "",
+                invalidation=decision.invalidation if decision else "",
+                spot=getattr(evidence, "price", None),
+                levels=levels_from(result),
+                price_context=evidence.price_context() if evidence else "",
+                earnings_note=result.queued.earnings_note,
+                dividend_yield_pct=getattr(fundamentals, "dividend_yield", None),
+                degraded=bool(getattr(result, "degraded", False)),
+            )
+        )
+    return OptionsContext(
+        run_date=run_date.isoformat(), data_as_of=data_as_of, verdicts=rows
+    )
