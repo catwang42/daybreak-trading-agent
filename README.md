@@ -14,15 +14,32 @@ A provider-agnostic Python application, built with Claude Code as the coding ass
 
 ## Local quickstart
 
-Python 3.11+ is required.
+Python 3.11+ is required, and it is deliberately **not** taken from whatever
+`python3` happens to be on the box. Debian bullseye ships 3.9 and the conda
+`(base)` env is 3.10 — neither can run this project. `uv` provisions its own
+3.11 so the environment does not depend on the host's Python at all.
 
 ```bash
-python3.11 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp config/.env.example config/.env   # fill free keys + LLM provider
-export PYTHONPATH=src                # the package is not pip-installed; the image sets this itself
+curl -LsSf https://astral.sh/uv/install.sh | sh   # one-time, installs to ~/.local/bin
+make env                                          # uv venv --python 3.11 + pinned requirements
+cp config/.env.example config/.env                # fill free keys + LLM provider
+make test                                         # 207 tests, must be green
+```
+
+Then each session:
+
+```bash
+source .venv/bin/activate && export PYTHONPATH=src   # or: make hint
 python -m tradingagent --stage all
 ```
+
+`PYTHONPATH=src` is required because the package is not pip-installed; the
+container image sets it itself. The `make` targets (`test`, `smoke`, `run`)
+call `.venv/bin/python` directly and need no activation.
+
+> Do not run the suite from conda `(base)`. It is Python 3.10 with an
+> unrelated, older `typer`, and it will fail on missing `feedparser`/`alpaca`
+> plus a `make_metavar()` TypeError. See [Environment](#environment).
 
 Output lands in `reports/<date>/daily-brief.md`, per-ticker analyses in
 `reports/<date>/deep/<SYM>.md`, and appends to `journal/journal.jsonl` (all git-ignored;
@@ -149,8 +166,34 @@ graded as misses. Until a source has a record it runs at weight 1.000.
 ## Tests
 
 ```bash
-pytest -q     # 200 tests; reference/ cookbooks are excluded from collection
+make test     # 207 tests; reference/ cookbooks are excluded from collection
 ```
+
+`pytest.ini` already sets `-q`, so pass no extra `-q` — `-qq` suppresses the
+pass/fail summary line and the run looks like it produced nothing.
+
+## Environment
+
+One environment, built by `make env`, described entirely by `requirements.txt`.
+
+| | |
+|---|---|
+| Interpreter | uv-managed CPython 3.11 (`~/.local/share/uv/python/…`), not the host's |
+| Location | `.venv/` (a real virtualenv — has `bin/activate`) |
+| Rebuild | `make clean-env && make env` |
+| Live check | `make smoke` — read-only Alpaca option-chain fetch |
+
+`make smoke` is the fastest proof that credentials and `alpaca-py` both work;
+the unit tests mock Alpaca on purpose, so they cannot tell you that.
+
+**Why not the host Pythons.** Debian bullseye's apt has no 3.11, and conda
+`(base)` is 3.10 with an older `typer` (0.13.1) that calls
+`Parameter.make_metavar()` without the `ctx` argument click 8.4 now requires —
+plus it has none of this project's dependencies. `uv` sidesteps both by
+fetching its own 3.11. An earlier session worked around this with a conda env
+created at the path `./.venv`; that looked like a virtualenv but had no
+`bin/activate`, which is why `source .venv/bin/activate` used to fail. It has
+been replaced.
 
 ## Build with Claude Code
 
