@@ -5,6 +5,8 @@ It uses the market-data and *paper* trading-clock APIs for session context and
 cross-checks yfinance quotes. Any live-order code path is refused by design:
 :class:`~alpaca.trading.client.TradingClient` is constructed with
 ``paper=True`` and only read-only calls (clock, calendar) are made.
+
+:mod:`tradingagent.data.option_chain` reads option chains under the same rule.
 """
 
 from __future__ import annotations
