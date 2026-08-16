@@ -231,3 +231,35 @@ def test_neither_stage_holds_a_reference_to_the_llm_gateway():
     ).read_text()
     assert "gateway" not in source.lower()
     assert "llm" not in source.lower()
+
+
+def test_a_failed_resolution_costs_the_grading_and_not_the_daily_run():
+    # Resolution rides along inside `--stage all`, after the tokens are spent.
+    # yfinance is the flakiest dependency in the project; if it falls over here
+    # the day's research is already on disk and the email still has to go.
+    import logging
+
+    from tradingagent import __main__ as cli
+
+    def explode(_settings, **_kwargs):
+        raise RuntimeError("yfinance said no")
+
+    import tradingagent.evaluation.stage as stage_module
+
+    original = stage_module.run_outcomes
+    stage_module.run_outcomes = explode
+    try:
+        cli._resolve_outcomes_quietly(object(), logging.getLogger("test"))
+    finally:
+        stage_module.run_outcomes = original
+
+
+def test_the_daily_run_resolves_outcomes_before_it_sends_the_email(tmp_path):
+    # Friday's evidence block is rendered during delivery, so a resolution that
+    # happened after the send would be a week late in the only place anyone
+    # reads it.
+    from tradingagent import __main__ as cli
+
+    source = Path(cli.__file__).read_text()
+    body = source.split("if stage is Stage.all:")[1].split("def _echo_discovery")[0]
+    assert body.index("_resolve_outcomes_quietly") < body.index("run_report")

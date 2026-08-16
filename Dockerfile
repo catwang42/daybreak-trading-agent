@@ -27,5 +27,17 @@ RUN useradd --create-home --uid 1000 agent \
     && chown -R agent:agent /app
 USER agent
 
+# The experiment ledger stamps every row with the commit that produced it, and
+# that is the whole point of the ledger: a change in the numbers has to be
+# attributable to a change in the code. The image carries neither a git binary
+# nor a .git directory, so the commit has to come from outside —
+# `docker build --build-arg GIT_COMMIT=$(git rev-parse HEAD)`. Cloud Build's
+# `--tag` shorthand takes no build args, so deploy/setup.sh sets the same
+# variable on the job instead; either way the env var is what the ledger reads.
+# An unstamped build still runs; it just files every row under "unknown", which
+# no later reader can use.
+ARG GIT_COMMIT=unknown
+ENV GIT_COMMIT=${GIT_COMMIT}
+
 ENTRYPOINT ["python", "-m", "tradingagent"]
 CMD ["--stage", "all"]

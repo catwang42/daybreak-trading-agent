@@ -165,6 +165,13 @@ ENV_VARS+=",VERTEXAI_PROJECT=${VERTEXAI_PROJECT},VERTEXAI_LOCATION=${VERTEXAI_LO
 ENV_VARS+=",LLM_FAST_MODEL=${LLM_FAST_MODEL},LLM_SMART_MODEL=${LLM_SMART_MODEL},LLM_DEEP_MODEL=${LLM_DEEP_MODEL}"
 ENV_VARS+=",DEEP_TICKER_CAP=${DEEP_TICKER_CAP:-5},DEBATE_ROUNDS=${DEBATE_ROUNDS:-1}"
 ENV_VARS+=",SMTP_HOST=${SMTP_HOST:-smtp.gmail.com},SMTP_PORT=${SMTP_PORT:-587}"
+# The experiment ledger stamps every row with the commit that produced it, which
+# is the only way a later change in the numbers can be attributed to a change in
+# the code. The image carries neither git nor .git, and `gcloud builds submit
+# --tag` takes no --build-arg, so the commit is set here instead — this script
+# builds and deploys in one go, so the job's env and its image are the same code.
+GIT_COMMIT="$(git -C "$(dirname "$0")/.." rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+ENV_VARS+=",GIT_COMMIT=${GIT_COMMIT}"
 
 gcloud run jobs deploy "$JOB" --image "$IMAGE" --region "$REGION" \
   --service-account "$SA" --task-timeout=30m --memory=1Gi --max-retries=0 \

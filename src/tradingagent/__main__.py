@@ -181,6 +181,14 @@ def main(
             _echo_deep(settings, deep)
             _echo_options(settings, options)
 
+            # Resolution rides along with the scheduled run rather than needing
+            # a second job: `--stage all` is the only thing that fires every
+            # weekday, and a horizon nobody resolves is a decision nobody grades.
+            # It goes here, after the tokens are spent and before the email, so
+            # a bar fetch that falls over costs the grading and not the research
+            # — and so Friday's evidence block counts today's resolutions.
+            _resolve_outcomes_quietly(settings, log)
+
             # Delivery is last, after every artefact is on disk and in GCS, so a
             # send failure costs the email and not the run. It still exits
             # non-zero: in Cloud Run a silent non-delivery is indistinguishable
@@ -304,6 +312,17 @@ def _echo_options(settings, options) -> None:
     )
     if options.degraded.entries:
         typer.secho(f"DEGRADED: {', '.join(options.degraded.sources)}", fg="yellow")
+
+
+def _resolve_outcomes_quietly(settings, log) -> None:
+    """Resolve matured horizons inside the daily run, and never fail it."""
+    try:
+        from .evaluation.stage import run_outcomes
+
+        _echo_outcomes(run_outcomes(settings))
+    except Exception as exc:  # noqa: BLE001 - the day's research is already on disk
+        log.warning("Outcome resolution skipped: %s", exc)
+        typer.secho(f"Outcomes: skipped ({exc})", fg="yellow")
 
 
 def _echo_outcomes(result) -> None:

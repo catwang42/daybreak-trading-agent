@@ -9,4 +9,6 @@ reports/*
 !reports/.gitkeep
 journal/*
 !journal/.gitkeep
+evaluation/*
+!evaluation/.gitkeep
 .gcloud/
