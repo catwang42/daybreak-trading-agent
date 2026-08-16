@@ -19,6 +19,10 @@ from dotenv import load_dotenv
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = REPO_ROOT / "config"
 
+#: The three cost tiers. Declared here rather than in :mod:`tradingagent.llm`
+#: because config has to validate ``PM_TIER`` before anything imports LiteLLM.
+TIERS: tuple[str, ...] = ("fast", "smart", "deep")
+
 
 class ConfigError(RuntimeError):
     """Raised when the environment is unusable or violates a guardrail."""
@@ -166,6 +170,12 @@ class Settings:
     # well under a cent, so the FRED dependency would buy precision the decision
     # cannot use. Override with RISK_FREE_RATE if the curve moves materially.
     risk_free_rate: float = 0.045
+    #: Which tier writes the portfolio manager's verdict. An A/B knob, not a
+    #: tuning one: the milestone question is whether the DEEP tier's verdict is
+    #: measurably better than the SMART tier's, and that can only be answered by
+    #: running some days on each and grading them apart. Every ledger record
+    #: names the tier that produced it, so the comparison stays computable.
+    pm_tier: str = "deep"
 
     @property
     def reports_dir(self) -> Path:
@@ -174,6 +184,15 @@ class Settings:
     @property
     def journal_path(self) -> Path:
         return REPO_ROOT / "journal" / "journal.jsonl"
+
+    @property
+    def ledger_root(self) -> Path:
+        """The experiment ledger lives beside the journal and mirrors with it."""
+        return self.journal_path.parent / "ledger"
+
+    @property
+    def evaluation_dir(self) -> Path:
+        return REPO_ROOT / "evaluation"
 
     def report_dir(self) -> Path:
         return self.reports_dir / self.run_date.isoformat()
@@ -187,6 +206,14 @@ def load_settings(run_date: date | None = None, env_file: Path | None = None) ->
 
     prefs_path = CONFIG_DIR / "preferences.md"
     prefs = parse_preferences(prefs_path.read_text()) if prefs_path.exists() else Preferences()
+
+    pm_tier = env("PM_TIER", "deep").lower()
+    if pm_tier not in TIERS:
+        raise ConfigError(
+            f"PM_TIER must be one of {', '.join(TIERS)}; got {pm_tier!r}. The portfolio "
+            f"manager's tier is an A/B variable and an unrecognised value would silently "
+            f"fall back, making the two arms indistinguishable in the ledger."
+        )
 
     paper = env_bool("ALPACA_PAPER", default=True)
     if not paper:
@@ -215,6 +242,7 @@ def load_settings(run_date: date | None = None, env_file: Path | None = None) ->
         preferences=prefs,
         run_date=run_date or date.today(),
         risk_free_rate=env_float("RISK_FREE_RATE", 0.045),
+        pm_tier=pm_tier,
     )
 
     # Export the Vertex settings LiteLLM reads from the process environment.

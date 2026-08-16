@@ -152,7 +152,7 @@ def report_dir(tmp_path):
 def test_run_report_assembles_everything_from_disk(report_dir, monkeypatch):
     captured = {}
 
-    def fake_send(run_date, brief_path, deep_paths, verdicts, degraded_sources):
+    def fake_send(run_date, brief_path, deep_paths, verdicts, degraded_sources, evidence=""):
         captured.update(locals())
         return "sent"
 
@@ -179,3 +179,70 @@ def test_in_memory_degradation_wins_over_reparsing_the_brief(report_dir, monkeyp
 
     S.run_report(Settings(report_dir, date(2026, 8, 14)), degraded=tracker)
     assert captured["degraded_sources"] == ["Alpaca"]
+
+
+# --- the Friday evidence block ----------------------------------------------------
+
+
+class EvaluatingSettings(Settings):
+    """A settings stand-in the evaluation lab can actually read."""
+
+    def __init__(self, root: Path, run_date: date, ledger_root: Path):
+        super().__init__(root, run_date)
+        self.ledger_root = ledger_root
+        self.evaluation_dir = root / "evaluation"
+        self.reports_bucket = ""
+
+
+def test_only_friday_carries_the_evidence_block(report_dir, monkeypatch):
+    calls: list[date] = []
+
+    def fake_evaluate(settings):
+        calls.append(settings.run_date)
+        raise RuntimeError("should not be reached")
+
+    import tradingagent.evaluation.stage as evaluation_stage
+
+    monkeypatch.setattr(evaluation_stage, "run_evaluate", fake_evaluate)
+
+    # Thursday: the lab is never consulted.
+    assert S.weekly_evidence(Settings(report_dir, date(2026, 8, 13)), date(2026, 8, 13)) == ""
+    assert calls == []
+    # Friday: it is, and the failure above is swallowed.
+    assert S.weekly_evidence(Settings(report_dir, date(2026, 8, 14)), date(2026, 8, 14)) == ""
+    assert calls == [date(2026, 8, 14)]
+
+
+def test_an_evaluation_failure_never_costs_the_morning_email(report_dir, monkeypatch):
+    import tradingagent.evaluation.stage as evaluation_stage
+
+    monkeypatch.setattr(
+        evaluation_stage,
+        "run_evaluate",
+        lambda settings: (_ for _ in ()).throw(OSError("ledger unreadable")),
+    )
+    captured = {}
+    monkeypatch.setattr(S, "send_daily_brief", lambda *a, **k: captured.update(k) or "sent")
+
+    assert S.run_report(Settings(report_dir, date(2026, 8, 14))) == "sent"
+    assert captured["evidence"] == ""
+
+
+def test_the_friday_email_carries_what_the_weekly_file_says(report_dir, tmp_path, monkeypatch):
+    settings = EvaluatingSettings(report_dir, date(2026, 8, 14), tmp_path / "ledger")
+    captured = {}
+    monkeypatch.setattr(S, "send_daily_brief", lambda *a, **k: captured.update(k) or "sent")
+    monkeypatch.setattr(
+        "tradingagent.evaluation.stage.write_report", lambda path, content, bucket="": path
+    )
+
+    S.run_report(settings)
+    assert captured["evidence"].startswith("## Evidence so far")
+    assert "INSUFFICIENT DATA" in captured["evidence"]
+
+
+def test_an_explicit_evidence_string_is_passed_through_untouched(report_dir, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(S, "send_daily_brief", lambda *a, **k: captured.update(k) or "sent")
+    S.run_report(Settings(report_dir, date(2026, 8, 14)), evidence="## Evidence so far\n\nnone")
+    assert captured["evidence"] == "## Evidence so far\n\nnone"

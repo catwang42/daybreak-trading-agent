@@ -53,3 +53,23 @@ def test_debate_rounds_capped_at_two(monkeypatch, tmp_path):
     monkeypatch.setenv("ALPACA_PAPER", "true")
     monkeypatch.setenv("DEBATE_ROUNDS", "9")
     assert load_settings(env_file=tmp_path / "absent.env").debate_rounds == 2
+
+
+def test_pm_tier_defaults_to_deep(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALPACA_PAPER", "true")
+    monkeypatch.delenv("PM_TIER", raising=False)
+    assert load_settings(env_file=tmp_path / "absent.env").pm_tier == "deep"
+
+
+def test_pm_tier_accepts_a_cheaper_arm(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALPACA_PAPER", "true")
+    monkeypatch.setenv("PM_TIER", "SMART")
+    assert load_settings(env_file=tmp_path / "absent.env").pm_tier == "smart"
+
+
+def test_an_unknown_pm_tier_is_refused_rather_than_silently_defaulted(monkeypatch, tmp_path):
+    """A typo'd arm that quietly falls back makes the two arms indistinguishable."""
+    monkeypatch.setenv("ALPACA_PAPER", "true")
+    monkeypatch.setenv("PM_TIER", "opus")
+    with pytest.raises(ConfigError, match="PM_TIER must be one of"):
+        load_settings(env_file=tmp_path / "absent.env")

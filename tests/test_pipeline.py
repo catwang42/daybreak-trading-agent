@@ -219,6 +219,46 @@ def test_the_happy_path_spends_each_tier_exactly_where_the_cost_policy_says():
     assert result.total_calls == 12
 
 
+def test_the_pm_tier_is_an_ab_arm_that_moves_the_spend_and_nothing_else():
+    """--pm-tier smart is the cheaper arm of item 5's comparison."""
+    gw = FakeGateway()
+    result = analyze_ticker(gw, evidence(), DegradedTracker(), rounds=1, pm_tier="smart")
+
+    assert gw.tiers().count("deep") == 0
+    assert gw.tiers().count("smart") == 8  # the seven, plus the manager's verdict
+    assert gw.calls[-1] == ("smart", PortfolioDecision)
+    assert result.seat_tiers["portfolio_manager"] == "smart"
+    assert result.seat_tiers["trader"] == "smart", "no other seat moves"
+
+
+def test_every_result_names_the_tier_that_wrote_each_seat():
+    result = analyze_ticker(FakeGateway(), evidence(), DegradedTracker(), rounds=1)
+    assert result.seat_tiers["portfolio_manager"] == "deep"
+    assert result.seat_tiers["analyst_technical"] == "fast"
+
+
+def test_the_seat_tier_map_matches_the_call_sites_it_claims_to_mirror():
+    """A record of the wrong tier is worse than none: it would settle the A/B wrongly."""
+    import inspect
+    import re
+    from pathlib import Path
+
+    from tradingagent.pipeline import deep as deep_module
+    from tradingagent.pipeline.deep import SEAT_TIERS
+    from tradingagent.pipeline.portfolio_manager import run_portfolio_manager
+
+    pipeline_dir = Path(deep_module.__file__).parent
+    seen: set[str] = set()
+    for path in pipeline_dir.glob("*.py"):
+        seen.update(re.findall(r'tier="(fast|smart|deep)"', path.read_text()))
+    # The portfolio manager's is parameterised, so its literal lives in the
+    # signature default rather than at the call site.
+    seen.add(inspect.signature(run_portfolio_manager).parameters["tier"].default)
+
+    assert set(SEAT_TIERS.values()) == seen
+    assert SEAT_TIERS["portfolio_manager"] == "deep"
+
+
 def test_a_second_debate_round_adds_exactly_two_more_smart_calls():
     one = FakeGateway()
     analyze_ticker(one, evidence(), DegradedTracker(), rounds=1)

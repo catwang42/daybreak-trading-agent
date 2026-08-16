@@ -1,4 +1,4 @@
-"""Entrypoint: ``python -m tradingagent [--stage discovery|deep|options|report|all]``.
+"""Entrypoint: ``python -m tradingagent [--stage discovery|deep|options|report|all|outcomes|evaluate]``.
 
 Runs headless in a container (Cloud Run Jobs) or from a shell. Asserts
 ``ALPACA_PAPER=true`` at startup — the process refuses to start otherwise.
@@ -7,6 +7,7 @@ Runs headless in a container (Cloud Run Jobs) or from a shell. Asserts
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from datetime import date
 from enum import Enum
@@ -25,6 +26,11 @@ class Stage(str, Enum):
     options = "options"
     report = "report"
     all = "all"
+    # M7. Both read records and bars; neither spends a token or writes a
+    # recommendation, which is why they are safe to schedule separately and
+    # to re-run over the same day as often as you like.
+    outcomes = "outcomes"
+    evaluate = "evaluate"
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -59,6 +65,16 @@ def main(
     tickers: Optional[str] = typer.Option(
         None, "--tickers", help="Comma-separated deep-stage override, e.g. 'ADSK,V,FDX'."
     ),
+    pm_tier: Optional[str] = typer.Option(
+        None,
+        "--pm-tier",
+        help="Tier for the portfolio manager's verdict (fast|smart|deep). A/B arm; logged in the ledger.",
+    ),
+    backfill: bool = typer.Option(
+        False,
+        "--backfill",
+        help="With --stage outcomes: seed the ledger from the pre-ledger journal first.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging."),
 ) -> None:
     _configure_logging(verbose)
@@ -69,6 +85,12 @@ def main(
     except ValueError:
         typer.secho(f"Invalid --date '{run_date}'; expected YYYY-MM-DD.", fg="red", err=True)
         raise typer.Exit(2)
+
+    # Set before load_settings so the override lands inside the config hash: an
+    # A/B arm chosen on the command line has to be as visible to the ledger as
+    # one chosen in the environment, or the two days are indistinguishable.
+    if pm_tier:
+        os.environ["PM_TIER"] = pm_tier
 
     try:
         settings = load_settings(run_date=parsed_date)
@@ -82,17 +104,31 @@ def main(
     # Stateless containers start with an empty disk, so the journal has to come
     # back from GCS before anything reads it — the source-accuracy tracker
     # weights signals against weeks of history it would otherwise not have.
-    from .storage import mirror_journal, restore_journal
+    from .storage import mirror_journal, mirror_ledger, restore_journal, restore_ledger
 
     if settings.reports_bucket:
         restored = restore_journal(settings.reports_bucket, settings.journal_path)
         log.info("Journal restored from GCS: %d entries", restored)
+        # The outcomes job resolves horizons written weeks ago, so it needs the
+        # whole ledger back before it can find anything to resolve.
+        streams = restore_ledger(settings.reports_bucket, settings.ledger_root)
+        if streams:
+            log.info("Ledger restored from GCS: %s", streams)
 
     from .delivery.email import DeliveryError
     from .delivery.stage import run_report, verdicts_from_results
     from .stages import run_all, run_deep, run_discovery, run_options
 
     def dispatch() -> None:
+        if stage in (Stage.outcomes, Stage.evaluate):
+            from .evaluation.stage import run_evaluate, run_outcomes
+
+            if stage is Stage.outcomes:
+                _echo_outcomes(run_outcomes(settings, backfill=backfill))
+            else:
+                _echo_evaluate(run_evaluate(settings))
+            return
+
         if stage is Stage.report:
             # Re-delivery only: no market data, no LLM calls, no journal writes.
             try:
@@ -145,6 +181,14 @@ def main(
             _echo_deep(settings, deep)
             _echo_options(settings, options)
 
+            # Resolution rides along with the scheduled run rather than needing
+            # a second job: `--stage all` is the only thing that fires every
+            # weekday, and a horizon nobody resolves is a decision nobody grades.
+            # It goes here, after the tokens are spent and before the email, so
+            # a bar fetch that falls over costs the grading and not the research
+            # — and so Friday's evidence block counts today's resolutions.
+            _resolve_outcomes_quietly(settings, log)
+
             # Delivery is last, after every artefact is on disk and in GCS, so a
             # send failure costs the email and not the run. It still exits
             # non-zero: in Cloud Run a silent non-delivery is indistinguishable
@@ -177,10 +221,12 @@ def main(
         # In `finally` on purpose: a run that aborted halfway may still have
         # journaled a shortlist, and losing those entries would quietly corrupt
         # the accuracy tracker's denominator.
-        if settings.reports_bucket and mirror_journal(
-            settings.reports_bucket, settings.journal_path
-        ):
-            log.info("Journal mirrored to GCS.")
+        if settings.reports_bucket:
+            if mirror_journal(settings.reports_bucket, settings.journal_path):
+                log.info("Journal mirrored to GCS.")
+            pushed = mirror_ledger(settings.reports_bucket, settings.ledger_root)
+            if pushed:
+                log.info("Ledger mirrored to GCS: %s", pushed)
 
 
 def _echo_discovery(settings, result) -> None:
@@ -266,6 +312,42 @@ def _echo_options(settings, options) -> None:
     )
     if options.degraded.entries:
         typer.secho(f"DEGRADED: {', '.join(options.degraded.sources)}", fg="yellow")
+
+
+def _resolve_outcomes_quietly(settings, log) -> None:
+    """Resolve matured horizons inside the daily run, and never fail it."""
+    try:
+        from .evaluation.stage import run_outcomes
+
+        _echo_outcomes(run_outcomes(settings))
+    except Exception as exc:  # noqa: BLE001 - the day's research is already on disk
+        log.warning("Outcome resolution skipped: %s", exc)
+        typer.secho(f"Outcomes: skipped ({exc})", fg="yellow")
+
+
+def _echo_outcomes(result) -> None:
+    typer.echo("")
+    typer.secho(
+        f"Outcomes: {result.resolved} newly resolved · {result.updated} updated · "
+        f"{result.pending} pending in {result.seconds:.1f}s",
+        fg="green",
+    )
+    typer.echo(f"As of:    {result.as_of} (latest session in the bars, not the wall clock)")
+    typer.echo(f"Complete: {result.complete} decision(s) have every horizon")
+    if result.backfilled:
+        typer.echo(f"Backfill: {result.backfilled} decision(s) recovered from the journal")
+    for note in result.notes[:10]:
+        typer.echo(f"  · {note}")
+    if len(result.notes) > 10:
+        typer.echo(f"  · ...and {len(result.notes) - 10} more")
+    if result.degraded.entries:
+        typer.secho(f"DEGRADED: {', '.join(result.degraded.sources)}", fg="yellow")
+
+
+def _echo_evaluate(result) -> None:
+    typer.echo("")
+    typer.secho(f"Evaluation: week {result.week} -> {result.path}", fg="green")
+    typer.echo(f"Resolved:   {result.resolved} observation(s) in {result.seconds:.1f}s")
 
 
 def _echo_delivery(result) -> None:

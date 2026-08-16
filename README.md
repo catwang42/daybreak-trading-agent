@@ -11,6 +11,8 @@ A provider-agnostic Python application, built with Claude Code as the coding ass
 | M3 | signal bundle — news tone, SEC Form 4, FRED macro, Polymarket odds, plus a source-accuracy tracker | **done** |
 | M4 | `--stage options` — CSP / covered-call candidates screened off the Alpaca paper chain | **done** |
 | M5 | `--stage report` — email delivery, GCS persistence, Cloud Run Jobs schedule | **done** |
+| M6 | research integrity — one snapshot per run, as-of-safe retrieval, macro-date confidence, entity-resolved news, computed trade math, shadowed signals | **done** |
+| M7 | `--stage outcomes` / `--stage evaluate` — experiment ledger, outcome resolution, signal grading v2, weekly evaluation report | **in progress** |
 
 ## Local quickstart
 
@@ -23,7 +25,7 @@ Python 3.11+ is required, and it is deliberately **not** taken from whatever
 curl -LsSf https://astral.sh/uv/install.sh | sh   # one-time, installs to ~/.local/bin
 make env                                          # uv venv --python 3.11 + pinned requirements
 cp config/.env.example config/.env                # fill free keys + LLM provider
-make test                                         # 350 tests, must be green
+make test                                         # 675 tests, must be green
 ```
 
 Then each session:
@@ -42,7 +44,8 @@ call `.venv/bin/python` directly and need no activation.
 > plus a `make_metavar()` TypeError. See [Environment](#environment).
 
 Output lands in `reports/<date>/daily-brief.md`, per-ticker analyses in
-`reports/<date>/deep/<SYM>.md`, and appends to `journal/journal.jsonl` (all git-ignored;
+`reports/<date>/deep/<SYM>.md`, appends to `journal/journal.jsonl`, and streams into
+`journal/ledger/*.jsonl` and `evaluation/<year>-<week>.md` (all git-ignored;
 set `REPORTS_BUCKET` to mirror them to GCS as well). If the `SMTP_*` block is
 filled in, the brief is also emailed — see [Delivery](#delivery).
 
@@ -54,10 +57,14 @@ python -m tradingagent --stage all              # discovery + deep + options + e
                        --stage deep             # deep-dive the queue from an earlier discovery
                        --stage options          # option overlay on an earlier deep run's verdicts
                        --stage report           # re-send an existing day's email; no data, no LLM calls
+                       --stage outcomes         # resolve matured ledger entries against bars; no LLM calls
+                       --stage evaluate         # write this week's evaluation report from the ledger
                        --date 2026-08-13        # re-run for a past session
                        --shortlist 5            # shortlist size (default 10)
                        --limit 100              # cap universe, for quick smoke runs
                        --tickers CRM,V,FDX      # deep-stage override, ignores the queue
+                       --pm-tier smart          # A/B arm for the PM verdict (fast|smart|deep), logged
+                       --backfill               # with --stage outcomes: seed the ledger from the old journal
                        --refresh-universe       # re-pull S&P 500 constituents
                        --skip-llm               # data + screener only, zero token cost
                        --verbose
@@ -484,6 +491,127 @@ source is unchanged — it is still fetched, scored, journaled, shown in the rep
 handed to the prompts, because a source that is never measured can never graduate. What it
 loses is the vote.
 
+## Evaluation lab
+
+The journal answers *what did we recommend*. It cannot answer *does the research work*,
+and for three structural reasons rather than one missing query:
+
+- **It only records the winners.** A line is written for a name that made the shortlist.
+  The 30 candidates ranked below it are gone by the time anyone asks whether the ranking
+  was any good — and a ranking can only be graded against what it rejected.
+- **It cannot attribute a change.** Two months of entries with no note of which prompts,
+  models or commit produced them make every improvement unexplainable.
+- **Its outcome fields were a promise, not a measurement.** `outcome_7d` was `null` on all
+  128 lines since M1, because nothing ever went back and filled it in.
+
+So `src/tradingagent/evaluation/` adds an append-only **experiment ledger** beside the
+journal, four streams under `journal/ledger/`, one JSON object per line, GCS-persisted the
+same merge-on-identity way the journal is:
+
+| Stream | One row per | Carries |
+|---|---|---|
+| `runs.jsonl` | (run, stage) | the fingerprint, once |
+| `candidates.jsonl` | every name in the **pre-selection pool** | screener score, screen rank, final rank, per-source shadow adjustment, sector, eligible / selected / counterfactual-selected / queued |
+| `decisions.jsonl` | every rating, at every stage | rating, confidence, horizon, entry condition, invalidation, target, the computed `TradePlan`, per-seat model tier, signal readings |
+| `outcomes.jsonl` | every decision, at maturity | returns and excess returns per horizon, MFE/MAE, entry status |
+
+Every row carries the same provenance block: `run_id`, `snapshot_id`, `market_as_of`,
+`git_commit`, `config_hash`, the three model ids, a hash per prompt file, and
+`universe_version`. Nothing is edited: a record that turns out to be wrong is superseded by
+a later record with the same key, and readers take last-write-wins. A decision's key is
+`<date>:<ticker>:<stage>`, not the run id, so re-running a day supersedes it instead of
+doubling the sample.
+
+`git_commit` comes from `$GIT_COMMIT`. The image carries neither a git binary nor a `.git`,
+so something outside it has to stamp the commit: `docker build --build-arg GIT_COMMIT=…` for
+a local build, and `deploy/setup.sh` sets it as a job env var because `gcloud builds submit
+--tag` takes no build args (the script builds and deploys in one step, so the job's env and
+its image are the same code). An unstamped build still runs; it just files every row under
+`unknown`, which no later reader can use.
+
+### `--stage outcomes`
+
+Resolves matured entries against bars. Safe to schedule on its own after the close, safe to
+re-run over the same day as often as you like, and it also runs inside `--stage all` — the
+scheduled weekday job is the only thing that fires reliably, and a horizon nobody resolves
+is a decision nobody grades. It spends **no tokens**.
+
+For each unresolved decision it records the return at **1, 5, 10, 20 and 60 sessions** —
+trading days from the decision's session, not calendar days — the excess of each over SPY
+*and* over the name's sector ETF, the maximum favourable and adverse excursion, and what the
+published plan actually did: did the entry trigger, did the stop or the target come first.
+A bar that spans both the stop and the target is scored as **the stop**; daily bars cannot
+resolve the order and the pessimistic reading is the honest one.
+
+It is as-of-safe like every other data path: the job takes its own `ResearchSnapshot`, the
+maturity test is against the latest session **in the bars**, and an unmatured horizon is
+absent from the record rather than written as zero. A missing benchmark degrades the row —
+raw return kept, excess omitted — instead of failing the job.
+
+`--stage outcomes --backfill` seeds the ledger from the pre-ledger journal first. 68 of the
+128 journal lines recovered as decisions; the other 60 were within-journal duplicates. Every
+backfilled row is flagged `backfilled: true` under a synthetic `backfill-<date>` run id with
+an empty `snapshot_id` and `config_hash`, **no candidate rows are invented** (the journal only
+ever held the shortlist, and writing that as the pool would make control-vs-treatment compare
+a list against itself), and fields the journal never held — horizon, entry condition,
+invalidation, seat tiers — stay blank rather than being parsed back out of report prose two
+months later. A real row is never overwritten by a reconstruction.
+
+### Signal grading v2
+
+`evaluation/grading.py` sits on the ledger and replaces three defects in the v1 tracker:
+
+| v1 | v2 |
+|---|---|
+| discovery and deep on the same name counted as two observations | clustered by ticker × decision date — **one** observation; the deep rating wins, the readings merge |
+| graded against the raw 7-day move | graded against **excess** return vs SPY at 1d, 5d and 20d |
+| accuracy only | accuracy **and lift** — the source's mean directional excess minus the pool's own mean excess |
+
+Lift is the number that answers the question. A momentum screen's picks drift up, so
+"predicted up" is nearly free; a source can be 70% accurate and have added nothing, and the
+table says so. Moves inside the ±1% dead band are dropped rather than graded as misses, and
+abstentions are not scored.
+
+The graduation ladder is unchanged — `SHADOW → ±1 at 20 → ±3 at 50 → ±5 at 100 → ±8 only
+with a human writing `proven`. Grading feeds it; it does not bypass it.
+
+### Control vs treatment
+
+Because every signal is shadowed, **the shipped shortlist is the price-only control** — by
+construction, at no extra cost. Each run also logs the counterfactual shortlist the same
+screen would have produced with the adjustments live, so the two lists can be compared on
+forward returns. On 2026-08-16 they disagreed on two names out of ten: the price-only list
+took COF (screen rank 6, pushed to final rank 8 by −4.92 shadow points), the signals-adjusted
+list took CI (screen rank 18, lifted to 11). Neither list costs a second run.
+
+### A/B hooks
+
+Logged, not yet run. Each decision records which tier produced each seat's output, so
+quick-take-vs-deep and smart-vs-deep portfolio manager are computable from records that
+already exist. `--pm-tier fast|smart|deep` overrides the verdict tier for a future A/B day;
+it is set before the config hash is computed, so an arm chosen on the command line is as
+visible to the ledger as one chosen in the environment.
+
+### `--stage evaluate`
+
+Writes `evaluation/<ISO year>-<ISO week>.md` (GCS-mirrored) and appends an
+**"Evidence so far"** section to the Friday brief's email body — the body only; the attached
+markdown is that day's archived research and a rolling evidence block inside it would be
+wrong the moment another decision resolves. Seven sections: sample, hit rate by rating,
+the per-source signal table with graduation standing, control vs treatment, trade plans,
+model tiers, and *what this week cannot tell you*.
+
+**Nothing is reported below the minimum sample.** `MIN_SAMPLE` is 20 resolved observations;
+under it every cell reads `INSUFFICIENT` and the verdict line says so before anything else.
+A four-observation week where every call was right prints no rate at all — a test asserts the
+string `100%` appears nowhere in that week's markdown. The caveats section names what the
+sample cannot support: below-minimum n, no decision yet at its 60-session horizon, how many
+rows are backfilled and therefore carry no attribution, and whether control and treatment
+have even disagreed yet.
+
+No model is called by either stage, and a test fails the build if `stage.py` or `report.py`
+ever mentions the gateway — the report's whole claim is that no number in it was generated.
+
 ## Guardrails
 
 - Research only. `ALPACA_PAPER=true` is asserted at startup and the Alpaca client refuses
@@ -500,7 +628,7 @@ loses is the vote.
 ## Tests
 
 ```bash
-make test     # 350 tests; reference/ cookbooks are excluded from collection
+make test     # 675 tests; reference/ cookbooks are excluded from collection
 ```
 
 `pytest.ini` already sets `-q`, so pass no extra `-q` — `-qq` suppresses the

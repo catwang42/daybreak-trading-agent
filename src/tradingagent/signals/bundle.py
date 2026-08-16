@@ -112,6 +112,27 @@ class SignalBundle:
         """
         return self._fuse(MAX_SCORE_ADJUSTMENT, lambda _source: 1.0)
 
+    def per_source_shadow(self) -> dict[str, float]:
+        """Each source's own share of :meth:`shadow_adjustment`, in points.
+
+        The fused total says the layer wanted this name three points higher; it
+        does not say who wanted it. Grading a *source* needs the second answer,
+        and the ledger has to record it at decision time because the sum cannot
+        be decomposed afterwards.
+
+        These are the pre-clamp terms of :meth:`_fuse` — they sum to the shadow
+        adjustment except where the clamp bit, which is the honest way round: a
+        source's contribution is what it argued for, not what survived a
+        ceiling shared with everything else that fired.
+        """
+        if not self.ticker_signals:
+            return {}
+        share = MAX_SCORE_ADJUSTMENT / max(1.0, len(self.ticker_signals))
+        out: dict[str, float] = {}
+        for signal in self.ticker_signals:
+            out[signal.source] = out.get(signal.source, 0.0) + signal.signed_strength * share
+        return {source: value + 0.0 for source, value in out.items()}
+
     def net_direction(self) -> int:
         """The layer's directional read, shadow or not.
 

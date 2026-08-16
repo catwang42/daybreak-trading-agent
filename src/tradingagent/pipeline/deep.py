@@ -45,6 +45,34 @@ from .trader import run_trader
 
 log = logging.getLogger(__name__)
 
+#: Which cost tier writes each seat's output. A map rather than a scatter of
+#: string literals at the call sites, because M7 has to record it: "is the DEEP
+#: portfolio manager worth its tokens against the SMART one" is only answerable
+#: if every decision names the tier that produced it, on the day it was made.
+#: Not a routing table — the call sites still pass their own tier, and this
+#: mirrors them. :func:`test_seat_tiers_match_the_call_sites` keeps the two
+#: honest, because a mirror that drifts is worse than no record at all.
+SEAT_TIERS: dict[str, str] = {
+    "analyst_fundamentals": "fast",
+    "analyst_news": "fast",
+    "analyst_sentiment": "fast",
+    "analyst_technical": "fast",
+    "researcher_bull": "smart",
+    "researcher_bear": "smart",
+    "research_manager": "smart",
+    "trader": "smart",
+    "risk_aggressive": "smart",
+    "risk_conservative": "smart",
+    "risk_neutral": "smart",
+    "restate_figures": "smart",
+    "portfolio_manager": "deep",
+}
+
+
+def seat_tiers(pm_tier: str = "deep") -> dict[str, str]:
+    """:data:`SEAT_TIERS` with the one seat that is an A/B arm substituted in."""
+    return {**SEAT_TIERS, "portfolio_manager": pm_tier or "deep"}
+
 
 @dataclass
 class TierCost:
@@ -77,6 +105,8 @@ class DeepResult:
     aborted: str | None = None
     seconds: float = 0.0
     cost_by_tier: dict[str, TierCost] = field(default_factory=dict)
+    #: Role -> the tier that produced it on this run, for the M7 ledger.
+    seat_tiers: dict[str, str] = field(default_factory=dict)
 
     @property
     def symbol(self) -> str:
@@ -164,11 +194,14 @@ def analyze_ticker(
     degraded: DegradedTracker,
     rounds: int = 1,
     snapshot: ResearchSnapshot | None = None,
+    pm_tier: str = "deep",
 ) -> DeepResult:
     """Run the full role sequence for one ticker. Never raises."""
     started = time.monotonic()
     before = _snapshot(gateway.ledger)
-    result = DeepResult(queued=evidence.queued, evidence=evidence)
+    result = DeepResult(
+        queued=evidence.queued, evidence=evidence, seat_tiers=seat_tiers(pm_tier)
+    )
 
     def finish() -> DeepResult:
         result.seconds = time.monotonic() - started
@@ -217,7 +250,7 @@ def analyze_ticker(
         trade_plan=result.trade_plan,
     )
 
-    log.info("Deep %s: portfolio manager verdict (deep tier)", evidence.symbol)
+    log.info("Deep %s: portfolio manager verdict (%s tier)", evidence.symbol, pm_tier)
     result.decision, result.decision_error = run_portfolio_manager(
         gateway,
         evidence,
@@ -228,6 +261,7 @@ def analyze_ticker(
         degraded,
         proposal_error=result.proposal_error,
         trade_plan=result.trade_plan,
+        tier=pm_tier,
     )
     # Rebuilt against the verdict that will actually be published: the manager
     # can overrule the research manager's rating and states the price target,
@@ -314,7 +348,12 @@ def run_queue(
         evidence = builder.build(queued)
         results.append(
             analyze_ticker(
-                gateway, evidence, degraded, rounds=settings.debate_rounds, snapshot=snapshot
+                gateway,
+                evidence,
+                degraded,
+                rounds=settings.debate_rounds,
+                snapshot=snapshot,
+                pm_tier=settings.pm_tier,
             )
         )
     return results

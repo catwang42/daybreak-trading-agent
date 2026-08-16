@@ -209,6 +209,65 @@ def test_the_journal_survives_a_full_stateless_cycle(bucket, tmp_path):
     assert day_three.read_text().splitlines() == ['{"day":1}', '{"day":2}']
 
 
+# --- experiment ledger round trip ----------------------------------------------
+
+
+def test_the_ledger_survives_a_full_stateless_cycle(bucket, tmp_path):
+    """A decision written today must still be resolvable in sixty days.
+
+    The outcomes job reads decisions written weeks earlier. A ledger that reset
+    with the container would leave every one of them permanently unresolved.
+    """
+    day_one = tmp_path / "run1" / "ledger"
+    day_one.mkdir(parents=True)
+    (day_one / "decisions.jsonl").write_text('{"decision_id":"2026-08-16:V:deep"}\n')
+    (day_one / "candidates.jsonl").write_text('{"candidate_id":"run-a:V"}\n')
+    assert S.mirror_ledger("gs://b", day_one) == {
+        "candidates.jsonl": True,
+        "decisions.jsonl": True,
+    }
+
+    day_two = tmp_path / "run2" / "ledger"
+    restored = S.restore_ledger("gs://b", day_two)
+    assert restored == {"candidates.jsonl": 1, "decisions.jsonl": 1}
+    with (day_two / "decisions.jsonl").open("a") as fh:
+        fh.write('{"decision_id":"2026-08-17:V:deep"}\n')
+    S.mirror_ledger("gs://b", day_two)
+
+    day_three = tmp_path / "run3" / "ledger"
+    assert S.restore_ledger("gs://b", day_three)["decisions.jsonl"] == 2
+
+
+def test_ledger_blobs_sit_under_the_journal_prefix():
+    assert S.ledger_blob("decisions.jsonl") == "journal/ledger/decisions.jsonl"
+
+
+def test_a_replayed_ledger_row_is_not_mirrored_twice(bucket, tmp_path):
+    root = tmp_path / "ledger"
+    root.mkdir()
+    (root / "runs.jsonl").write_text('{"run":1}\n')
+    S.mirror_ledger("gs://b", root)
+    S.mirror_ledger("gs://b", root)
+    assert bucket.store[S.ledger_blob("runs.jsonl")] == '{"run":1}\n'
+
+
+def test_ledger_round_trip_is_a_no_op_without_a_bucket(tmp_path):
+    assert S.restore_ledger("", tmp_path / "ledger") == {}
+    assert S.mirror_ledger("", tmp_path / "ledger") == {}
+
+
+def test_an_absent_ledger_stream_is_skipped_not_created(bucket, tmp_path):
+    root = tmp_path / "ledger"
+    root.mkdir()
+    (root / "runs.jsonl").write_text('{"run":1}\n')
+    S.mirror_ledger("gs://b", root)
+    assert set(bucket.store) == {S.ledger_blob("runs.jsonl")}
+
+    fresh = tmp_path / "fresh" / "ledger"
+    assert set(S.restore_ledger("gs://b", fresh)) == {"runs.jsonl"}
+    assert not (fresh / "outcomes.jsonl").exists()
+
+
 def test_reports_are_uploaded_under_their_repo_relative_path(bucket):
     from tradingagent.report.writer import write_report
 
