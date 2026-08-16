@@ -299,6 +299,37 @@ class PortfolioDecision(BaseModel):
         return _nullish_to_none(v)
 
 
+class RestatedParagraph(BaseModel):
+    """One paragraph re-written against the computed plan (SMART tier)."""
+
+    label: str = Field(
+        max_length=60,
+        description=(
+            "The paragraph's label, copied exactly from the list you were "
+            "given — e.g. 'The verdict summary'."
+        ),
+    )
+    text: str = Field(
+        max_length=3100,
+        description=(
+            "The same paragraph with every price and percentage matching the "
+            "computed plan. Same argument, same tone, same length; no new "
+            "figures, no note about the correction. Hard limit 3100 characters, "
+            "and never longer than the paragraph you were given."
+        ),
+    )
+
+
+class RestatedProse(BaseModel):
+    """The restatement pass's reply: one entry per paragraph asked for."""
+
+    paragraphs: list[RestatedParagraph] = Field(
+        min_length=1,
+        max_length=6,
+        description="One entry per paragraph listed, in the order they were listed.",
+    )
+
+
 class OptionsRecommendation(BaseModel):
     """The options strategist's pick from the screened candidates (SMART tier).
 

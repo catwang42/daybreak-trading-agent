@@ -142,7 +142,7 @@ class may change a decision:
 
 | Class | Where it comes from | May gate an entry or options event risk? |
 |---|---|---|
-| `VERIFIED` | the issuing agency's own published schedule, fetched for this run — FRED's release-date mirror of BLS/BEA/Census, or the Fed's FOMC calendar | **yes** |
+| `VERIFIED` | the issuing agency's own published schedule, fetched for this run — FRED's release-date mirror of BLS/BEA/Census, or the Fed's FOMC calendar | **yes, if the date is still ahead of the run** |
 | `INDICATIVE` | our static weekday-of-month rule | no — context only |
 | `STALE` | an agency schedule answered, but its newest date for that release is already behind the run's market date | no — that is when it last printed, not when it next will |
 | `MISSING` | we expect the release and no source gave us a date | no — named as unknown, never guessed at |
@@ -161,9 +161,14 @@ publishes; it is not a schedule.
   covered (ISM, which is a private survey FRED does not carry).
 - The permitted-use rule travels with the dates into every prompt and into report
   section 1, so a model reading them knows which are real.
+- Confidence is only half the test; recency is the other half. A macro release lands in
+  the morning, so a VERIFIED date on or before the run's market date is already in the
+  close the plan is priced against — "enter after Retail Sales on the 16th" was written
+  over a Retail Sales print VERIFIED for the 14th, which is the session the run priced.
+  A date has to be VERIFIED **and** still ahead of the run to gate anything.
 - It is enforced in code, not asked for in prose: after the portfolio manager rules,
   `src/tradingagent/pipeline/macro_gate.py` reads the thesis, ruling and summary back and
-  strikes any "wait until <release>" that rests on a non-VERIFIED date. The paragraph
+  strikes any "wait until <release>" that rests on a date that fails either test. The paragraph
   stays as written; the plan prints **"Macro gates removed from this plan"** with the
   reason, and the entry stands on the levels in the table.
 - Nothing here is a new paid service. FRED is already a dependency and the Fed's calendar
@@ -236,9 +241,16 @@ reference that was no longer the entry. A human sizing off 2.5% would have taken
 risk than they thought.
 
 - The plan is asserted before it is published: the stop must be on the losing side of the
-  entry, risk ≤ 8% of entry, reward:risk ≥ 1.5×, and every price must trace to the same
-  snapshot. A plan that fails is published as **`NO TRADE — inconsistent plan`** with the
-  reason, in the deep report and in the brief's index — never quietly softened.
+  entry, risk ≤ 8% of entry **and ≥ the noise floor**, reward:risk ≥ 1.5×, and every price
+  must trace to the same snapshot. A plan that fails is published as
+  **`NO TRADE — inconsistent plan`** with the reason, in the deep report and in the
+  brief's index — never quietly softened.
+- The noise floor is `max(0.5 × ATR(14), 0.3% of entry)`, and it is the newest assertion
+  because WMB published a $73.17 stop under a $73.20 entry. Three cents passed every
+  other check — losing side, 0.04% risk, 293× reward:risk — and, because size is the risk
+  budget divided by the stop distance, it earned the maximum position. All three risk
+  seats then spent their turn arguing the stop was an artifact. A stop inside half a day's
+  range is not an invalidation level; it is a division by almost zero.
 - Size is derived, not stated: 0.5% of the portfolio at risk ÷ the stop distance, capped
   at 10%. A tighter stop earns a bigger position; that is the only way it grows.
 - A proposed level more than 25% from the close, or on the wrong side of it for the entry
@@ -248,8 +260,19 @@ risk than they thought.
   seats argue with the numbers that will be published.
 - Afterwards the prose is read back: any risk %, stop or entry price quoted in the
   thesis, ruling or summary that disagrees with the computed plan is printed beneath it
-  as a correction. The paragraph is left exactly as written — an edited thesis is one
-  nobody can audit — and the computed figure is the one to use.
+  as a correction, and the computed figure is the one to use.
+- How far it disagrees decides what happens next. Under **1% of the entry** the correction
+  line is the whole answer. Past it the paragraph is not a footnote, it is a second plan:
+  WMB's summary quoted a $71.50 stop against a computed $73.17 and its thesis a $75.50
+  entry against a computed $73.20, which is a different position at a different size with a
+  different invalidation. So CLAUDE.md's rule for malformed output applies to output that
+  is well-formed and wrong — the author is shown the computed table and the specific gaps
+  and gets **one** call (SMART tier) to restate the same argument against the real numbers;
+  the restatement is validated against its own schema and read back again, and anything
+  still disagreeing is marked **DEGRADED** in the report right where the paragraph prints.
+  The pipeline still never edits a paragraph — the replacement text is the model's own, and
+  section 4 lists which paragraphs went through this. An unedited thesis nobody can audit
+  is the point of the whole read-back.
 - The journal records the computed plan (`trade_plan`) alongside the verdict, so a later
   review grades the arithmetic that was actually published.
 
