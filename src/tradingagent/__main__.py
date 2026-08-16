@@ -70,6 +70,11 @@ def main(
         "--pm-tier",
         help="Tier for the portfolio manager's verdict (fast|smart|deep). A/B arm; logged in the ledger.",
     ),
+    backfill: bool = typer.Option(
+        False,
+        "--backfill",
+        help="With --stage outcomes: seed the ledger from the pre-ledger journal first.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging."),
 ) -> None:
     _configure_logging(verbose)
@@ -119,7 +124,7 @@ def main(
             from .evaluation.stage import run_evaluate, run_outcomes
 
             if stage is Stage.outcomes:
-                _echo_outcomes(run_outcomes(settings))
+                _echo_outcomes(run_outcomes(settings, backfill=backfill))
             else:
                 _echo_evaluate(run_evaluate(settings))
             return
@@ -310,6 +315,8 @@ def _echo_outcomes(result) -> None:
     )
     typer.echo(f"As of:    {result.as_of} (latest session in the bars, not the wall clock)")
     typer.echo(f"Complete: {result.complete} decision(s) have every horizon")
+    if result.backfilled:
+        typer.echo(f"Backfill: {result.backfilled} decision(s) recovered from the journal")
     for note in result.notes[:10]:
         typer.echo(f"  · {note}")
     if len(result.notes) > 10:

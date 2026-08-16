@@ -36,6 +36,7 @@ class OutcomesResult:
     updated: int = 0
     pending: int = 0
     complete: int = 0
+    backfilled: int = 0
     records: list = field(default_factory=list)
     snapshot: ResearchSnapshot | None = None
     degraded: DegradedTracker = field(default_factory=DegradedTracker)
@@ -52,6 +53,7 @@ def run_outcomes(
     *,
     degraded: DegradedTracker | None = None,
     ledger: ExperimentLedger | None = None,
+    backfill: bool = False,
 ) -> OutcomesResult:
     """Resolve every ledger decision whose horizons have matured.
 
@@ -59,11 +61,26 @@ def run_outcomes(
     is skipped, and one that has three gets a fresh row superseding the old.
     Re-running this after the close every day is the intended usage and costs
     one bulk price download.
+
+    ``backfill`` first reconstructs what the pre-ledger journal can support —
+    flagged as backfilled, never overwriting a real row. Safe to leave on, but
+    off by default: it is a one-time migration, not part of the daily job.
     """
     started = time.monotonic()
     degraded = degraded if degraded is not None else DegradedTracker()
     store = ledger or ExperimentLedger(settings.ledger_root)
     result = OutcomesResult(degraded=degraded)
+
+    if backfill:
+        from .backfill import backfill as run_backfill
+
+        recovered = run_backfill(settings.journal_path, store)
+        result.backfilled = len(recovered.decisions)
+        if recovered.decisions:
+            result.notes.append(
+                f"backfilled {len(recovered.decisions)} decision(s) from the journal "
+                f"across {len(recovered.dates)} date(s); every row is flagged backfilled"
+            )
 
     decisions = list(store.latest(DECISIONS, "decision_id").values())
     if not decisions:
