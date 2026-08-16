@@ -176,6 +176,10 @@ class Positioning:
     recommendation_key: str | None = None
     analyst_count: int | None = None
     target_mean: float | None = None
+    #: The median matters more than the mean on a thinly covered name: one
+    #: outlier target on eight analysts drags the mean somewhere no analyst
+    #: actually is, and that is the number our own target gets compared against.
+    target_median: float | None = None
     target_high: float | None = None
     target_low: float | None = None
     short_percent_of_float: float | None = None
@@ -208,6 +212,7 @@ class Positioning:
             ("Consensus recommendation", self.recommendation_key or "unavailable"),
             ("Analysts covering", _num(self.analyst_count, digits=0)),
             ("Mean price target", _money_price(self.target_mean) + gap),
+            ("Median price target", _money_price(self.target_median)),
             ("Target range", f"{_money_price(self.target_low)} – {_money_price(self.target_high)}"),
             ("Recommendation spread", self.recommendation_spread or "unavailable"),
             ("Short interest (% of float)", _flagged("short_percent_of_float", _pct(self.short_percent_of_float))),
@@ -381,6 +386,7 @@ class FundamentalsClient:
             recommendation_key=str(info.get("recommendationKey") or "") or None,
             analyst_count=int(count) if count is not None else None,
             target_mean=_pick(info, "targetMeanPrice"),
+            target_median=_pick(info, "targetMedianPrice"),
             target_high=_pick(info, "targetHighPrice"),
             target_low=_pick(info, "targetLowPrice"),
             short_percent_of_float=_pick(info, "shortPercentOfFloat"),
