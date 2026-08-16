@@ -243,6 +243,35 @@ Deliberate deviations:
   ~102 KB behind a "view entire message" link, and the brief alone is ~75 KB. Inlining
   five deep reports would push the mandatory disclaimer footer behind that link, which is
   the one part of the report that may not be hidden.
+- **The email is a decision sheet, not a rendering of the report (M8).** Every upstream
+  cookbook ends at the report: TradingAgents prints the PM's paragraph, tradermonty's
+  skills emit markdown, staskh's scripts print a table. None of them has an opinion about
+  what a human reads at 07:00 on a phone, because none of them is a scheduled job whose
+  only output is an email. Inlining our brief followed the cookbooks and produced the
+  failure the cookbooks cannot see: the verdicts were below Gmail's ~102 KB clip. The
+  body is now eight sections that fit one screen — regime, verified gates, setups with
+  computed levels, avoids, options go/no-go, the overnight diff, confidence, evidence —
+  and the reports ride along as PDFs. Cost: a second presentation layer to keep in step
+  with the reports. Benefit: the thing the job exists to deliver is above the fold.
+- **The sheet reads a frozen artefact, never a rendered report (M8).** The obvious
+  implementation is to parse the brief — the regime line, the wait condition and the
+  entry level all exist in it as sentences. That is exactly the defect M6 removed when it
+  stopped the analysts quoting each other's figures, so `--stage all` writes
+  `presentation-context.json` while every typed object is still in memory and the sheet
+  is built from that. Its loader is deliberately *tolerant* where `DeepContext.read` is
+  strict: a deep stage reasoning from the wrong market picture is worse than no deep
+  stage, but refusing to send the morning email because the presentation artefact is a
+  version behind is the wrong trade.
+- **Charts are drawn from the plan, not from the prose (M8).** matplotlib on Agg, four
+  pictures, and every level on a setup chart is a `TradePlan` field copied through the
+  context. None is recomputed at draw time: a chart that disagrees with the table beneath
+  it is a second opinion nobody asked for, and the reader has no way to tell which one is
+  the plan.
+- **Attachments are PDFs (M8).** A `.md` attachment is fine on a desktop and effectively
+  undelivered on a phone, which is where the brief is most likely to be read. WeasyPrint
+  renders the same markdown that goes to the bucket, so the two cannot disagree; its
+  pango/cairo dependency is installed in the image and its absence degrades to attaching
+  the markdown, so the format is never load-bearing for the delivery.
 
 ### Paid bottlenecks identified (not purchased — surfaced in report section 7)
 | Capability | Upstream source | Cost | Our substitute |

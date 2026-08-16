@@ -12,7 +12,8 @@ A provider-agnostic Python application, built with Claude Code as the coding ass
 | M4 | `--stage options` — CSP / covered-call candidates screened off the Alpaca paper chain | **done** |
 | M5 | `--stage report` — email delivery, GCS persistence, Cloud Run Jobs schedule | **done** |
 | M6 | research integrity — one snapshot per run, as-of-safe retrieval, macro-date confidence, entity-resolved news, computed trade math, shadowed signals | **done** |
-| M7 | `--stage outcomes` / `--stage evaluate` — experiment ledger, outcome resolution, signal grading v2, weekly evaluation report | **in progress** |
+| M7 | `--stage outcomes` / `--stage evaluate` — experiment ledger, outcome resolution, signal grading v2, weekly evaluation report | **done** |
+| M8 | presentation — one-screen decision sheet, embedded charts, PDF attachments, analyst consensus | **in progress** |
 
 ## Local quickstart
 
@@ -25,7 +26,7 @@ Python 3.11+ is required, and it is deliberately **not** taken from whatever
 curl -LsSf https://astral.sh/uv/install.sh | sh   # one-time, installs to ~/.local/bin
 make env                                          # uv venv --python 3.11 + pinned requirements
 cp config/.env.example config/.env                # fill free keys + LLM provider
-make test                                         # 675 tests, must be green
+make test                                         # 731 tests, must be green
 ```
 
 Then each session:
@@ -359,16 +360,38 @@ If every candidate conflicts, the screen returns nothing and the rejection tally
 
 ### Delivery
 
-The run ends by emailing the brief over SMTP (`src/tradingagent/delivery/email.py`).
-Subject line: `Daybreak 2026-08-14 — 3 verdicts, top: NVDA Buy`, where the top
-name is the best rating, ties broken by deep-queue order.
+The run ends by emailing a **decision sheet** over SMTP
+(`src/tradingagent/delivery/email.py`). Subject line: `Daybreak 2026-08-14 — 3
+verdicts, top: NVDA Buy`, where the top name is the best rating, ties broken by
+deep-queue order.
+
+The body used to be the brief. That was ~75 KB of styled markdown, and Gmail
+clips a body over ~102 KB behind a "view entire message" link — so the verdicts
+the email exists to show sat below a fold a phone never reached. The body is now
+eight sections that fit one screen, and the research ships as attachments.
 
 | Part | Why |
 |---|---|
-| brief as inline HTML | the thing you actually read, on a phone, without opening an attachment. Tables get inline styles and a horizontal scroll wrapper because Gmail strips `<style>` blocks |
-| `daily-brief.md` attached | the source of truth, greppable and diffable |
-| `deep/<SYM>.md` attached | a rendered brief is already ~75 KB and Gmail clips a body over ~102 KB behind a "view entire message" link; inlining the deep reports too would hide the disclaimer |
-| plain-text alternative | the raw markdown, for clients that refuse HTML |
+| decision sheet as inline HTML | regime line, verified gates, best setups with computed entry/stop/target, avoids, options go/no-go, overnight diff, confidence, evidence. Inline CSS only, because Gmail deletes `<head>` and `<style>`; a single centred table, because Outlook renders with Word |
+| four embedded PNG charts | SPY with its 50/200-day averages, the breadth gauge, ranked sector momentum, and per-ticker six-month price with the plan's levels drawn on it. `multipart/related` with `cid:` references, so they draw in place |
+| `daily-brief.pdf` + `deep/<SYM>.pdf` attached | the full research. PDF rather than `.md` because a phone renders a PDF and offers to open a `.md` in a text editor that is not installed |
+| plain-text alternative | the same sheet without markup, levels included, so a client that refuses HTML can still answer "what do I do today" |
+| `.md` in GCS | unchanged. The bucket keeps the greppable, diffable source of truth |
+
+Attachments are capped at 20 MB in total. Past that the file is not silently
+dropped: it is named in the body as a link to the object in the bucket. Charts
+are best-effort — a matplotlib failure costs one picture, and every figure a
+chart draws also appears in a table, so a client with images off loses nothing
+but the picture.
+
+Every price on the sheet is a `TradePlan` field. Nothing is parsed back out of a
+rendered report, because a regular expression between the trade plan and the
+human is the defect M6 removed when it stopped the analysts quoting each other's
+figures. `--stage all` writes `presentation-context.json` while every typed
+object is still in memory, and the sheet is built from that and nothing else — a
+standalone `--stage report` tomorrow rebuilds the same email, offline. A session
+that predates the file, or one whose run did not finish, gets a sheet that says
+which sections it could not build rather than a guessed one.
 
 A **DEGRADED run still sends**, with the failure in the subject
 (`… · DEGRADED: yfinance OHLCV, Finnhub +2 more`). A missing report is what
@@ -628,7 +651,7 @@ ever mentions the gateway — the report's whole claim is that no number in it w
 ## Tests
 
 ```bash
-make test     # 675 tests; reference/ cookbooks are excluded from collection
+make test     # 731 tests; reference/ cookbooks are excluded from collection
 ```
 
 `pytest.ini` already sets `-q`, so pass no extra `-q` — `-qq` suppresses the
