@@ -312,6 +312,20 @@ def test_a_wait_for_a_verified_date_is_left_alone():
     assert notes == []
 
 
+def test_a_release_with_no_date_at_all_cannot_be_waited_for():
+    """Found by the M6 evidence run. When the agency schedule says nothing is
+    due, the release produces no event — so matching waits against the calendar
+    alone let the original KMI wording through on exactly the run where PPI was
+    not due. A release we hold no VERIFIED date for is ungateable whether or
+    not it appears on the list."""
+    notes = suppressed_gates(
+        {"The thesis": "Hold off until the PPI print lands mid-week."},
+        [VERIFIED_CPI],  # a real calendar for that week: no PPI row at all
+    )
+    assert len(notes) == 1
+    assert "no VERIFIED date for it in the reporting window" in notes[0]
+
+
 def test_a_release_merely_mentioned_is_not_a_gate():
     notes = suppressed_gates(
         {"The thesis": "Margins have held through three PPI prints."}, [GUESSED_PPI]

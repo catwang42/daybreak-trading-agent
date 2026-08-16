@@ -70,21 +70,38 @@ def suppressed_gates(texts: dict[str, str], events: list[MacroEvent]) -> list[st
     line per (label, release), ready to print beneath the plan.
     """
     out: list[str] = []
-    ungateable = [e for e in events if e.confidence != VERIFIED]
+    gateable = {e.name for e in events if e.confidence == VERIFIED}
+    listed = {e.name: e for e in events if e.confidence != VERIFIED}
+    # Every release we can recognise by name and cannot stand behind today —
+    # the ones on the calendar with a weak date, *and* the ones with no date at
+    # all. A release the agency schedule said nothing about produces no event,
+    # so matching only against ``events`` left "wait for the PPI print" — the
+    # original defect — unsuppressed on a run where PPI simply was not due.
+    ungateable = [
+        (name, listed.get(name))
+        for name in dict.fromkeys([*listed, *_ALIASES])
+        if name not in gateable
+    ]
     for label, text in texts.items():
         if not text:
             continue
         lowered = text.lower()
-        for event in ungateable:
-            hit = _gated_on(lowered, aliases(event))
+        for name, event in ungateable:
+            hit = _gated_on(lowered, aliases(event) if event else _ALIASES.get(name, (name.lower(),)))
             if hit is None:
                 continue
             out.append(
-                f"{label} waits for {event.name}, but that date is {event.confidence} "
-                f"({_why(event)}). {_RULE} The wait is not part of the plan; the entry "
-                f"stands on the levels in the table."
+                f"{label} waits for {name}, but {_unstandable(event)}. {_RULE} The wait "
+                f"is not part of the plan; the entry stands on the levels in the table."
             )
     return list(dict.fromkeys(out))
+
+
+def _unstandable(event: MacroEvent | None) -> str:
+    """Why this run may not let a reader wait for the release."""
+    if event is None:
+        return "this run holds no VERIFIED date for it in the reporting window"
+    return f"that date is {event.confidence} ({_why(event)})"
 
 
 _RULE = (
