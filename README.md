@@ -260,8 +260,19 @@ risk than they thought.
   seats argue with the numbers that will be published.
 - Afterwards the prose is read back: any risk %, stop or entry price quoted in the
   thesis, ruling or summary that disagrees with the computed plan is printed beneath it
-  as a correction. The paragraph is left exactly as written — an edited thesis is one
-  nobody can audit — and the computed figure is the one to use.
+  as a correction, and the computed figure is the one to use.
+- How far it disagrees decides what happens next. Under **1% of the entry** the correction
+  line is the whole answer. Past it the paragraph is not a footnote, it is a second plan:
+  WMB's summary quoted a $71.50 stop against a computed $73.17 and its thesis a $75.50
+  entry against a computed $73.20, which is a different position at a different size with a
+  different invalidation. So CLAUDE.md's rule for malformed output applies to output that
+  is well-formed and wrong — the author is shown the computed table and the specific gaps
+  and gets **one** call (SMART tier) to restate the same argument against the real numbers;
+  the restatement is validated against its own schema and read back again, and anything
+  still disagreeing is marked **DEGRADED** in the report right where the paragraph prints.
+  The pipeline still never edits a paragraph — the replacement text is the model's own, and
+  section 4 lists which paragraphs went through this. An unedited thesis nobody can audit
+  is the point of the whole read-back.
 - The journal records the computed plan (`trade_plan`) alongside the verdict, so a later
   review grades the arithmetic that was actually published.
 

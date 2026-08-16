@@ -25,6 +25,7 @@ from tradingagent.pipeline.trade_plan import (
     direction_for,
     plan_texts,
     quoted_figure_corrections,
+    quoted_figure_mismatches,
 )
 from tradingagent.snapshot import Observation
 
@@ -360,6 +361,41 @@ def test_the_same_disagreement_reaching_two_roles_is_reported_once():
 def test_an_unpriced_plan_makes_no_claims_about_the_prose():
     plan = build_trade_plan(evidence(priced=False, bars=False), proposal(), "Buy")
     assert quoted_figure_corrections(plan, {"The thesis": "Risking 2.5%."}) == []
+
+
+def test_a_number_that_is_not_a_level_for_this_ticker_is_not_read_as_one():
+    """WMB's risk ruling: "the $73.17 stop … manufactures a $0.03 risk-per-share".
+
+    The reader-back flagged $0.03 as a quoted stop against a computed $73.17 —
+    right regex, wrong noun. Three cents is not a price level for a $73 stock,
+    and under the tightened policy that false positive would have cost a
+    re-prompt and marked a correct paragraph DEGRADED.
+    """
+    plan = build_trade_plan(
+        evidence(last=75.20, atr=1.85),
+        proposal(entry_type="pullback", entry_level=73.20, invalidation_level=71.50),
+        "Overweight", target=82.00,
+    )
+    assert plan.status == PLAN
+    text = ("The stop at $73.17 is an artifact — a $0.03 risk/share off a rounding error.")
+    quoted = [m.quoted for m in quoted_figure_mismatches(plan, {"The risk ruling": text})]
+    assert quoted == [73.17], "the level is the disagreement; the three cents is not a level"
+
+
+def test_a_gap_wider_than_one_percent_of_entry_is_material_whatever_it_measures():
+    plan = build_trade_plan(evidence(last=100.0), proposal(), "Buy", target=112.0)
+    quoted = quoted_figure_mismatches(
+        plan,
+        {
+            "The verdict summary": "Stop at $94.50.",       # 1.5% of entry — material
+            "The thesis": "Stop at $95.10.",                # 0.9% — a correction only
+            "The risk ruling": "Risking 2.0% to the stop.",  # 2.0 points of entry — material
+            "The invalidation line": "Risking 4.4% to the stop.",  # 0.4 points — a correction
+        },
+    )
+    material = {m.label for m in quoted if m.material}
+    assert material == {"The verdict summary", "The risk ruling"}
+    assert len(quoted) == 4, "everything is still reported; only the response differs"
 
 
 def test_the_journal_records_the_computed_plan_not_the_narrative():

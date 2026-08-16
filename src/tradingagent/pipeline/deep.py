@@ -39,6 +39,7 @@ from .portfolio_manager import run_portfolio_manager
 from .risk import RiskReview, run_risk_committee
 from .schemas import PortfolioDecision, TraderProposal
 from .macro_gate import suppressed_gates
+from .restate import restate_quoted_figures
 from .trade_plan import TradePlan, build_trade_plan, plan_texts, quoted_figure_corrections
 from .trader import run_trader
 
@@ -83,8 +84,11 @@ class DeepResult:
 
     @property
     def degraded(self) -> bool:
-        return self.decision is None or self.aborted is not None or any(
-            not a.ok for a in self.analysts
+        return (
+            self.decision is None
+            or self.aborted is not None
+            or any(not a.ok for a in self.analysts)
+            or bool(self.trade_plan and self.trade_plan.degraded_fields)
         )
 
     @property
@@ -124,6 +128,11 @@ class DeepResult:
             reasons += [f"{v.seat} risk analyst did not report" for v in self.risk.voices if v.take is None]
         if self.decision is None and not self.aborted:
             reasons.append("portfolio manager produced no verdict")
+        if self.trade_plan is not None:
+            reasons += [
+                f"{label.lower()} still contradicts the computed plan after one re-prompt"
+                for label in sorted(self.trade_plan.degraded_fields)
+            ]
         if self.evidence:
             reasons += [f"missing {m}" for m in self.evidence.missing]
         return reasons
@@ -231,6 +240,27 @@ def analyze_ticker(
             result.decision.price_target,
             snapshot=snapshot,
         )
+        # A paragraph that quotes a level more than 1% away from the computed
+        # one is not a footnote, it is a second plan. Its author gets one call
+        # to restate it against the real numbers; what still disagrees after
+        # that is marked DEGRADED where it prints.
+        restated = restate_quoted_figures(
+            gateway, evidence, result.trade_plan, result.proposal, result.decision, degraded
+        )
+        result.proposal, result.decision = restated.proposal, restated.decision
+        result.trade_plan.restatements = restated.notes
+        result.trade_plan.degraded_fields = restated.degraded
+        if restated.notes:
+            log.info(
+                "Deep %s: %d paragraph(s) restated against the computed plan",
+                evidence.symbol, len(restated.notes),
+            )
+        if restated.degraded:
+            log.warning(
+                "Deep %s: %d paragraph(s) still contradict the computed plan — DEGRADED",
+                evidence.symbol, len(restated.degraded),
+            )
+
         texts = plan_texts(result.proposal, result.decision)
         result.trade_plan.corrections = quoted_figure_corrections(result.trade_plan, texts)
         # A wait that rests on an approximate release date is struck out here,

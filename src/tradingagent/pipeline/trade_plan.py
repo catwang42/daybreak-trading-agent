@@ -23,9 +23,13 @@ So:
   every price traces to the same snapshot. A plan that fails an assertion is not
   silently softened — it is published as ``NO TRADE — inconsistent plan`` with
   the reason.
-- :func:`quoted_figure_corrections` reads the model's prose back and flags any
-  figure that disagrees with the computed plan, so the STZ case would print a
-  correction instead of a contradiction.
+- :func:`quoted_figure_mismatches` reads the model's prose back and finds any
+  figure that disagrees with the computed plan, so the STZ case produces a
+  correction instead of a contradiction. A small disagreement is printed beneath
+  the paragraph. One larger than :data:`MATERIAL_DIVERGENCE_PCT` of the entry is
+  not a footnote — the paragraph and the table are describing different trades —
+  so :mod:`.restate` re-prompts the author once with the computed plan, and a
+  field that still disagrees afterwards is marked DEGRADED.
 """
 
 from __future__ import annotations
@@ -68,6 +72,23 @@ MAX_LEVEL_DRIFT_PCT = 25.0
 QUOTED_PCT_TOLERANCE = 0.3
 #: Same, for a quoted price, as a fraction of the entry.
 QUOTED_PRICE_TOLERANCE_PCT = 0.75
+#: Past this — measured, for every kind of figure, as a percentage of the entry
+#: — the paragraph and the table are not describing the same trade, and a
+#: footnote is not enough. WMB's verdict quoted a $71.50 stop over a computed
+#: $73.17 (2.3% of entry) while its thesis quoted a $75.50 entry over a computed
+#: $73.20 (3.1%); a reader who acted on the prose would have been in a different
+#: position, at a different size, with a different invalidation. The author is
+#: re-prompted once with the computed plan and the field is marked DEGRADED if
+#: it still disagrees — CLAUDE.md's rule for malformed output, applied to output
+#: that is well-formed and wrong.
+MATERIAL_DIVERGENCE_PCT = 1.0
+#: A quoted "stop" outside this band around the entry is not a level for this
+#: ticker. WMB's risk ruling said the $73.17 stop "manufactures a $0.03
+#: risk-per-share", and the reader-back flagged $0.03 as a quoted stop against a
+#: computed $73.17 — right regex, wrong noun. A number four times the entry, or
+#: a quarter of it, is a distance, a share count or a different instrument, and
+#: this pass has nothing useful to say about it.
+PLAUSIBLE_LEVEL_BAND = (0.25, 4.0)
 
 LONG_RATINGS = {"Buy", "Overweight"}
 SHORT_RATINGS = {"Sell", "Underweight"}
@@ -112,6 +133,11 @@ class TradePlan:
     warnings: list[str] = field(default_factory=list)
     #: Figures the models quoted that disagree with the computed ones.
     corrections: list[str] = field(default_factory=list)
+    #: Paragraphs their author re-wrote once against the computed plan.
+    restatements: list[str] = field(default_factory=list)
+    #: ``label -> reason`` for prose that still contradicts the plan after that
+    #: one re-prompt. The field prints with a DEGRADED marker where it appears.
+    degraded_fields: dict[str, str] = field(default_factory=dict)
     #: "Wait until <release>" instructions struck out because the date behind
     #: them is not VERIFIED — see :mod:`.macro_gate`.
     suppressed_gates: list[str] = field(default_factory=list)
@@ -159,6 +185,7 @@ class TradePlan:
             "snapshot_id": self.snapshot_id,
             "failures": list(self.failures),
             "suppressed_gates": list(self.suppressed_gates),
+            "degraded_fields": sorted(self.degraded_fields),
         }
 
 
@@ -378,67 +405,140 @@ _STOP_PATTERN = re.compile(r"stop(?:-loss|\s+loss)?[^.$\n]{0,24}\$\s?([\d,]+(?:\
 _ENTRY_PATTERN = re.compile(r"entr(?:y|ies)[^.$\n]{0,24}\$\s?([\d,]+(?:\.\d+)?)", re.I)
 
 
-def quoted_figure_corrections(plan: TradePlan, texts: dict[str, str]) -> list[str]:
-    """Every figure the prose quotes, checked against the computed plan.
+@dataclass(frozen=True)
+class QuotedFigure:
+    """One figure the prose named, and how far it is from the computed one."""
 
-    The computed value wins. We do not rewrite the model's paragraph — an
-    edited thesis is a thesis nobody can audit — we print the disagreement
-    next to it, which is what a reader needs to know anyway.
-    """
+    label: str
+    #: ``"risk"``, ``"stop"`` or ``"entry"``.
+    what: str
+    quoted: float
+    computed: float
+    #: The gap, always as a percentage of the entry, whatever kind of figure it
+    #: is — so one threshold governs prices and risk percentages alike.
+    divergence_pct: float
+
+    @property
+    def material(self) -> bool:
+        return self.divergence_pct > MATERIAL_DIVERGENCE_PCT
+
+    def correction(self) -> str:
+        """The line printed beneath the paragraph."""
+        if self.what == "risk":
+            return (
+                f"{self.label} says {self.quoted:.1f}% risk; the computed plan risks "
+                f"{self.computed:.1f}%. The computed figure is the one to use."
+            )
+        return (
+            f"{self.label} quotes a {self.what} of {_money(self.quoted)}; the computed "
+            f"plan uses {_money(self.computed)}."
+        )
+
+    def disagreement(self) -> str:
+        """The line shown to the model that has to restate the paragraph."""
+        if self.what == "risk":
+            return (
+                f"- {self.label} says {self.quoted:.1f}% risk. The plan risks "
+                f"{self.computed:.1f}%."
+            )
+        return (
+            f"- {self.label} quotes a {self.what} of {_money(self.quoted)}. The plan's "
+            f"{self.what} is {_money(self.computed)}."
+        )
+
+
+def quoted_figure_mismatches(plan: TradePlan, texts: dict[str, str]) -> list[QuotedFigure]:
+    """Every figure the prose quotes that the computed plan does not support."""
     if plan.entry is None:
         return []
-    out: list[str] = []
+    out: list[QuotedFigure] = []
     for label, text in texts.items():
         if not text:
             continue
-        for pattern in _RISK_PCT_PATTERNS:
-            for match in pattern.finditer(text):
-                quoted = _number(match.group(1))
-                if quoted is None or plan.risk_pct is None:
-                    continue
-                if abs(quoted - plan.risk_pct) > QUOTED_PCT_TOLERANCE:
-                    out.append(
-                        f"{label} says {quoted:.1f}% risk; the computed plan risks "
-                        f"{plan.risk_pct:.1f}% ({_money(plan.entry)} entry to "
-                        f"{_money(plan.stop)} stop). The computed figure is the one to use."
-                    )
+        out += _risk_mismatches(label, text, plan)
         out += _price_mismatches(label, text, _STOP_PATTERN, plan.stop, "stop", plan.entry)
         out += _price_mismatches(label, text, _ENTRY_PATTERN, plan.entry, "entry", plan.entry)
     # The same sentence often reaches two roles; say each thing once.
     return list(dict.fromkeys(out))
 
 
+def quoted_figure_corrections(plan: TradePlan, texts: dict[str, str]) -> list[str]:
+    """Every disagreement, as the report prints it.
+
+    The computed value wins. We do not rewrite the model's paragraph — an
+    edited thesis is a thesis nobody can audit — we print the disagreement
+    next to it, which is what a reader needs to know anyway. Where the gap is
+    material the paragraph's own author is asked to restate it first; see
+    :mod:`.restate`.
+    """
+    return list(dict.fromkeys(m.correction() for m in quoted_figure_mismatches(plan, texts)))
+
+
+def _risk_mismatches(label: str, text: str, plan: TradePlan) -> list[QuotedFigure]:
+    if plan.risk_pct is None:
+        return []
+    out: list[QuotedFigure] = []
+    for pattern in _RISK_PCT_PATTERNS:
+        for match in pattern.finditer(text):
+            quoted = _number(match.group(1))
+            if quoted is None:
+                continue
+            gap = abs(quoted - plan.risk_pct)
+            if gap > QUOTED_PCT_TOLERANCE:
+                # A risk percentage is already a percentage of the entry, so the
+                # gap between two of them is directly comparable to a price gap.
+                out.append(QuotedFigure(label, "risk", quoted, plan.risk_pct, gap))
+    return out
+
+
 def _price_mismatches(
     label: str, text: str, pattern: re.Pattern, computed: float | None, what: str, entry: float
-) -> list[str]:
+) -> list[QuotedFigure]:
     if computed is None or not entry:
         return []
-    tolerance = entry * QUOTED_PRICE_TOLERANCE_PCT / 100
-    out: list[str] = []
+    low, high = PLAUSIBLE_LEVEL_BAND
+    out: list[QuotedFigure] = []
     for match in pattern.finditer(text):
         quoted = _number(match.group(1).replace(",", ""))
-        if quoted is None:
+        if quoted is None or not low * entry <= quoted <= high * entry:
             continue
-        if abs(quoted - computed) > tolerance:
-            out.append(
-                f"{label} quotes a {what} of {_money(quoted)}; the computed plan uses "
-                f"{_money(computed)}."
-            )
+        divergence = abs(quoted - computed) / entry * 100
+        if divergence > QUOTED_PRICE_TOLERANCE_PCT:
+            out.append(QuotedFigure(label, what, quoted, computed, divergence))
     return out
+
+
+#: The prose fields that are allowed to name a number, and where each lives.
+#: ``label -> (which object carries it, attribute)``; :mod:`.restate` needs the
+#: attribute to put a restated paragraph back where it came from.
+TRADER_REASONING = "The trader's reasoning"
+TRADER_ENTRY_CONDITION = "The trader's entry condition"
+VERDICT_SUMMARY = "The verdict summary"
+THESIS = "The thesis"
+RISK_RULING = "The risk ruling"
+INVALIDATION_LINE = "The invalidation line"
+
+PROPOSAL = "proposal"
+DECISION = "decision"
+
+PROSE_FIELDS: dict[str, tuple[str, str]] = {
+    TRADER_REASONING: (PROPOSAL, "reasoning"),
+    TRADER_ENTRY_CONDITION: (PROPOSAL, "entry_condition"),
+    VERDICT_SUMMARY: (DECISION, "executive_summary"),
+    THESIS: (DECISION, "investment_thesis"),
+    RISK_RULING: (DECISION, "risk_ruling"),
+    INVALIDATION_LINE: (DECISION, "invalidation"),
+}
 
 
 def plan_texts(proposal, decision) -> dict[str, str]:
     """The prose fields that are allowed to name a number."""
-    texts: dict[str, str] = {}
-    if proposal is not None:
-        texts["The trader's reasoning"] = _attr(proposal, "reasoning", "") or ""
-        texts["The trader's entry condition"] = _attr(proposal, "entry_condition", "") or ""
-    if decision is not None:
-        texts["The verdict summary"] = getattr(decision, "executive_summary", "") or ""
-        texts["The thesis"] = getattr(decision, "investment_thesis", "") or ""
-        texts["The risk ruling"] = getattr(decision, "risk_ruling", "") or ""
-        texts["The invalidation line"] = getattr(decision, "invalidation", "") or ""
-    return texts
+    sources = {PROPOSAL: proposal, DECISION: decision}
+    return {
+        label: getattr(sources[owner], attr, "") or ""
+        for label, (owner, attr) in PROSE_FIELDS.items()
+        if sources[owner] is not None
+    }
 
 
 # --- formatting -----------------------------------------------------------

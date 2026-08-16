@@ -11,9 +11,29 @@ from __future__ import annotations
 
 from ..pipeline.analysts import stance_spread
 from ..pipeline.deep import DeepResult
+from ..pipeline.trade_plan import (
+    INVALIDATION_LINE,
+    RISK_RULING,
+    THESIS,
+    TRADER_ENTRY_CONDITION,
+    TRADER_REASONING,
+    VERDICT_SUMMARY,
+)
 from .render import DISCLAIMER
 
 OPTIONS_HEADING = "## 6. Options View"
+
+
+def _flag(result: DeepResult, label: str) -> list[str]:
+    """The DEGRADED marker for one prose field, printed under the field itself.
+
+    A paragraph that survived the restatement pass still contradicting the
+    computed plan is marked where it is read, not only in a footnote at the
+    bottom of section 4 — the reader who acts on it never gets that far.
+    """
+    plan = result.trade_plan
+    reason = plan.degraded_fields.get(label) if plan is not None else None
+    return [f"> **DEGRADED** — {reason}", ""] if reason else []
 
 
 def _verdict(result: DeepResult) -> str:
@@ -38,12 +58,15 @@ def _verdict(result: DeepResult) -> str:
         "",
         decision.executive_summary,
         "",
+        *_flag(result, VERDICT_SUMMARY),
         "**Thesis**",
         "",
         decision.investment_thesis,
         "",
+        *_flag(result, THESIS),
         f"**Invalidation:** {decision.invalidation}",
         "",
+        *_flag(result, INVALIDATION_LINE),
     ]
     if result.degraded:
         lines += [
@@ -133,9 +156,11 @@ def _proposal(result: DeepResult) -> str:
         "",
         proposal.reasoning,
         "",
+        *_flag(result, TRADER_REASONING),
     ]
     if proposal.entry_condition:
         lines += [f"**Entry condition:** {proposal.entry_condition}", ""]
+        lines += _flag(result, TRADER_ENTRY_CONDITION)
 
     if plan is None:
         lines += ["_No trade plan was computed for this ticker._", ""]
@@ -151,6 +176,13 @@ def _proposal(result: DeepResult) -> str:
     if plan.suppressed_gates:
         lines += ["**Macro gates removed from this plan:**", ""]
         lines += [f"- {note}" for note in plan.suppressed_gates]
+        lines.append("")
+    if plan.restatements:
+        # Not an edit by the pipeline: the author was shown the computed table
+        # and wrote the paragraph again. Saying which paragraphs those were is
+        # what keeps the report auditable.
+        lines += ["**Paragraphs restated against the computed plan:**", ""]
+        lines += [f"- {note}" for note in plan.restatements]
         lines.append("")
     if plan.corrections:
         # The prose is left as written; the disagreement is printed beside it.
@@ -192,7 +224,7 @@ def _risk(result: DeepResult) -> str:
             "",
         ]
     else:
-        lines += [result.decision.risk_ruling, ""]
+        lines += [result.decision.risk_ruling, "", *_flag(result, RISK_RULING)]
     return "\n".join(lines)
 
 
