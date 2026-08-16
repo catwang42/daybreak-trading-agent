@@ -185,6 +185,15 @@ class Settings:
     def journal_path(self) -> Path:
         return REPO_ROOT / "journal" / "journal.jsonl"
 
+    @property
+    def ledger_root(self) -> Path:
+        """The experiment ledger lives beside the journal and mirrors with it."""
+        return self.journal_path.parent / "ledger"
+
+    @property
+    def evaluation_dir(self) -> Path:
+        return REPO_ROOT / "evaluation"
+
     def report_dir(self) -> Path:
         return self.reports_dir / self.run_date.isoformat()
 

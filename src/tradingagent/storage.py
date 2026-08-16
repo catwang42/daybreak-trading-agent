@@ -157,3 +157,67 @@ def mirror_journal(bucket: str, journal_path: Path) -> bool:
     merged = _merge_lines(remote, journal_path.read_text(encoding="utf-8"))
     body = "\n".join(merged) + "\n" if merged else ""
     return upload_text(bucket, JOURNAL_BLOB, body, content_type="application/x-ndjson")
+
+
+# --- experiment ledger round trip ----------------------------------------------
+#
+# Same merge-and-dedupe as the journal, four times over, for the same reason and
+# one more: the outcomes job resolves horizons weeks after the decision was
+# written, so the ledger it reads has to contain every prior day's rows. A
+# ledger that reset nightly would leave every decision permanently unresolved —
+# the M6 failure mode (a journal that resets makes every source look untested)
+# repeated one level up.
+#
+# Ordering matters within a stream and not across them: rows are appended in
+# time order and `latest()` is last-write-wins, so remote-then-local keeps a
+# replay's correction after the row it corrects.
+
+
+def ledger_blob(stream: str) -> str:
+    from .evaluation.ledger import LEDGER_DIRNAME
+
+    return f"journal/{LEDGER_DIRNAME}/{stream}"
+
+
+def restore_ledger(bucket: str, ledger_root: Path) -> dict[str, int]:
+    """Seed every ledger stream from GCS. Returns ``{stream: rows restored}``."""
+    from .evaluation.ledger import STREAMS
+
+    restored: dict[str, int] = {}
+    if not bucket:
+        return restored
+    ledger_root = Path(ledger_root)
+    for stream in STREAMS:
+        remote = download_text(bucket, ledger_blob(stream))
+        if remote is None:
+            continue
+        path = ledger_root / stream
+        local = path.read_text(encoding="utf-8") if path.exists() else ""
+        merged = _merge_lines(remote, local)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(merged) + "\n" if merged else "", encoding="utf-8")
+        restored[stream] = len(merged)
+    if restored:
+        log.info("Restored ledger from GCS: %s", restored)
+    return restored
+
+
+def mirror_ledger(bucket: str, ledger_root: Path) -> dict[str, bool]:
+    """Push every ledger stream back to GCS. Returns ``{stream: uploaded}``."""
+    from .evaluation.ledger import STREAMS
+
+    pushed: dict[str, bool] = {}
+    ledger_root = Path(ledger_root)
+    if not bucket:
+        return pushed
+    for stream in STREAMS:
+        path = ledger_root / stream
+        if not path.exists():
+            continue
+        remote = download_text(bucket, ledger_blob(stream)) or ""
+        merged = _merge_lines(remote, path.read_text(encoding="utf-8"))
+        body = "\n".join(merged) + "\n" if merged else ""
+        pushed[stream] = upload_text(
+            bucket, ledger_blob(stream), body, content_type="application/x-ndjson"
+        )
+    return pushed
