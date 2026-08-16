@@ -10,15 +10,24 @@ printed on the 14th.
 
 The confidence classes in :mod:`tradingagent.discovery.release_schedule` say
 which dates may be used that way. This module enforces it: it reads the prose
-back, finds a wait that rests on a non-VERIFIED date, and records the
+back, finds a wait that rests on a date we cannot stand behind, and records the
 suppression next to the plan. The paragraph is left as the model wrote it, for
 the same reason the quoted-figure corrections are — an edited thesis is one
 nobody can audit — but the instruction is marked as not to be followed.
+
+A date has to pass two tests, not one. The first is confidence: only the issuing
+agency's own schedule may gate anything. The second is recency, and it was the
+half the V report actually failed — Retail Sales was VERIFIED for the 14th, the
+run priced the 14th close, and "enter after Retail Sales on the 16th" survived
+because the class was right even though the print was already in the price. A
+macro release lands in the morning; a date on or before the run's market date is
+history, and history cannot be waited for.
 """
 
 from __future__ import annotations
 
 import re
+from datetime import date
 
 from ..discovery.release_schedule import VERIFIED, MacroEvent
 
@@ -58,54 +67,84 @@ _ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def aliases(event: MacroEvent) -> tuple[str, ...]:
-    known = _ALIASES.get(event.name, ())
-    return known or (event.name.lower(),)
+    return alias_words(event.name)
 
 
-def suppressed_gates(texts: dict[str, str], events: list[MacroEvent]) -> list[str]:
+def alias_words(name: str) -> tuple[str, ...]:
+    known = _ALIASES.get(name, ())
+    return known or (name.lower(),)
+
+
+def may_gate(event: MacroEvent, as_of: date | None = None) -> bool:
+    """Can this run let a reader wait for ``event``?
+
+    VERIFIED, *and* still ahead of the run. ``as_of`` is the market date the
+    plan is priced against — the close of that session — so a release dated on
+    it printed hours before the price the entry rests on. Without an ``as_of``
+    only confidence is checked, which is the behaviour every caller had before.
+    """
+    if event.confidence != VERIFIED:
+        return False
+    if as_of is None or event.date is None:
+        return True
+    return event.date > as_of
+
+
+def suppressed_gates(
+    texts: dict[str, str], events: list[MacroEvent], as_of: date | None = None
+) -> list[str]:
     """Waits that rest on a date we cannot stand behind.
 
     ``texts`` is ``{label: prose}`` — the same shape
-    :func:`tradingagent.pipeline.trade_plan.plan_texts` produces. Returns one
-    line per (label, release), ready to print beneath the plan.
+    :func:`tradingagent.pipeline.trade_plan.plan_texts` produces. ``as_of`` is
+    the run's market date. Returns one line per (label, release), ready to print
+    beneath the plan.
     """
     out: list[str] = []
-    gateable = {e.name for e in events if e.confidence == VERIFIED}
-    listed = {e.name: e for e in events if e.confidence != VERIFIED}
+    gateable = {e.name for e in events if may_gate(e, as_of)}
+    listed: dict[str, list[MacroEvent]] = {}
+    for event in events:
+        listed.setdefault(event.name, []).append(event)
     # Every release we can recognise by name and cannot stand behind today —
-    # the ones on the calendar with a weak date, *and* the ones with no date at
-    # all. A release the agency schedule said nothing about produces no event,
-    # so matching only against ``events`` left "wait for the PPI print" — the
-    # original defect — unsuppressed on a run where PPI simply was not due.
-    ungateable = [
-        (name, listed.get(name))
-        for name in dict.fromkeys([*listed, *_ALIASES])
-        if name not in gateable
-    ]
+    # the ones on the calendar with a weak date, the ones whose only date has
+    # already printed, *and* the ones with no date at all. A release the agency
+    # schedule said nothing about produces no event, so matching only against
+    # ``events`` left "wait for the PPI print" — the original defect —
+    # unsuppressed on a run where PPI simply was not due.
+    ungateable = [name for name in dict.fromkeys([*listed, *_ALIASES]) if name not in gateable]
     for label, text in texts.items():
         if not text:
             continue
         lowered = text.lower()
-        for name, event in ungateable:
-            hit = _gated_on(lowered, aliases(event) if event else _ALIASES.get(name, (name.lower(),)))
-            if hit is None:
+        for name in ungateable:
+            if _gated_on(lowered, alias_words(name)) is None:
                 continue
             out.append(
-                f"{label} waits for {name}, but {_unstandable(event)}. {_RULE} The wait "
-                f"is not part of the plan; the entry stands on the levels in the table."
+                f"{label} waits for {name}, but {_unstandable(listed.get(name, []), as_of)}. "
+                f"{_RULE} The wait is not part of the plan; the entry stands on the levels "
+                f"in the table."
             )
     return list(dict.fromkeys(out))
 
 
-def _unstandable(event: MacroEvent | None) -> str:
+def _unstandable(candidates: list[MacroEvent], as_of: date | None) -> str:
     """Why this run may not let a reader wait for the release."""
-    if event is None:
+    if not candidates:
         return "this run holds no VERIFIED date for it in the reporting window"
+    printed = [e for e in candidates if e.confidence == VERIFIED and e.date is not None]
+    if printed and as_of is not None:
+        last = max(printed, key=lambda e: e.date)
+        return (
+            f"the VERIFIED date we hold for it, {last.date.isoformat()}, is not ahead of "
+            f"this run's {as_of.isoformat()} market date — it has already printed"
+        )
+    event = candidates[0]
     return f"that date is {event.confidence} ({_why(event)})"
 
 
 _RULE = (
-    "Only a VERIFIED date — one published by the issuing agency — may gate an entry."
+    "Only a VERIFIED date — one published by the issuing agency, and still ahead of this "
+    "run — may gate an entry."
 )
 
 

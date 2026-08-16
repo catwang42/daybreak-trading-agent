@@ -235,7 +235,9 @@ def analyze_ticker(
         result.trade_plan.corrections = quoted_figure_corrections(result.trade_plan, texts)
         # A wait that rests on an approximate release date is struck out here,
         # not argued with: the models never see which dates are schedules.
-        result.trade_plan.suppressed_gates = suppressed_gates(texts, evidence.macro_events)
+        result.trade_plan.suppressed_gates = suppressed_gates(
+            texts, evidence.macro_events, as_of=evidence.market_as_of
+        )
         if result.trade_plan.suppressed_gates:
             log.warning(
                 "Deep %s: %d macro gate(s) suppressed — unverified release date",

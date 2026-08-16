@@ -142,7 +142,7 @@ class may change a decision:
 
 | Class | Where it comes from | May gate an entry or options event risk? |
 |---|---|---|
-| `VERIFIED` | the issuing agency's own published schedule, fetched for this run — FRED's release-date mirror of BLS/BEA/Census, or the Fed's FOMC calendar | **yes** |
+| `VERIFIED` | the issuing agency's own published schedule, fetched for this run — FRED's release-date mirror of BLS/BEA/Census, or the Fed's FOMC calendar | **yes, if the date is still ahead of the run** |
 | `INDICATIVE` | our static weekday-of-month rule | no — context only |
 | `STALE` | an agency schedule answered, but its newest date for that release is already behind the run's market date | no — that is when it last printed, not when it next will |
 | `MISSING` | we expect the release and no source gave us a date | no — named as unknown, never guessed at |
@@ -161,9 +161,14 @@ publishes; it is not a schedule.
   covered (ISM, which is a private survey FRED does not carry).
 - The permitted-use rule travels with the dates into every prompt and into report
   section 1, so a model reading them knows which are real.
+- Confidence is only half the test; recency is the other half. A macro release lands in
+  the morning, so a VERIFIED date on or before the run's market date is already in the
+  close the plan is priced against — "enter after Retail Sales on the 16th" was written
+  over a Retail Sales print VERIFIED for the 14th, which is the session the run priced.
+  A date has to be VERIFIED **and** still ahead of the run to gate anything.
 - It is enforced in code, not asked for in prose: after the portfolio manager rules,
   `src/tradingagent/pipeline/macro_gate.py` reads the thesis, ruling and summary back and
-  strikes any "wait until <release>" that rests on a non-VERIFIED date. The paragraph
+  strikes any "wait until <release>" that rests on a date that fails either test. The paragraph
   stays as written; the plan prints **"Macro gates removed from this plan"** with the
   reason, and the entry stands on the levels in the table.
 - Nothing here is a new paid service. FRED is already a dependency and the Fed's calendar

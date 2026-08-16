@@ -308,8 +308,65 @@ def test_a_wait_for_a_verified_date_is_left_alone():
     notes = suppressed_gates(
         {"The trader's entry condition": "Wait for CPI on the 19th, then enter."},
         [VERIFIED_CPI, GUESSED_PPI],
+        as_of=AS_OF,
     )
     assert notes == []
+
+
+# --- recency: the other half of the V regression --------------------------
+
+PRINTED_RETAIL = MacroEvent(date(2026, 8, 14), "Retail Sales", "Medium",
+                            "FRED release calendar (BLS/BEA/Census)", VERIFIED)
+
+
+def test_a_verified_release_that_has_already_printed_cannot_gate_an_entry():
+    """The V wording, on the calendar that shipped it.
+
+    Retail Sales was VERIFIED for the 14th — the very session the run priced —
+    and "enter after Retail Sales on the 16th" passed, because the class was
+    right even though the print was hours old by the close the plan rests on.
+    Confidence was never the whole test.
+    """
+    notes = suppressed_gates(
+        {"The verdict summary": "Enter after Retail Sales on the 16th confirms the consumer."},
+        [PRINTED_RETAIL],
+        as_of=date(2026, 8, 14),
+    )
+    assert len(notes) == 1
+    assert "the VERIFIED date we hold for it, 2026-08-14" in notes[0]
+    assert "not ahead of this run's 2026-08-14 market date — it has already printed" in notes[0]
+    assert "still ahead of this run" in notes[0]
+
+
+def test_a_release_earlier_in_the_week_is_history_not_a_trigger():
+    monday = MacroEvent(date(2026, 8, 10), "CPI (Consumer Price Index)", "High",
+                        "FRED release calendar (BLS/BEA/Census)", VERIFIED)
+    notes = suppressed_gates(
+        {"The thesis": "Size up once the CPI print is out of the way."}, [monday], as_of=AS_OF
+    )
+    assert len(notes) == 1 and "2026-08-10" in notes[0]
+
+
+def test_the_next_verified_print_still_gates_even_when_the_last_one_is_on_the_list():
+    """A weekly release has both a printed date and a forthcoming one."""
+    last_week = MacroEvent(date(2026, 8, 13), "Initial Jobless Claims", "Medium",
+                           "FRED release calendar (BLS/BEA/Census)", VERIFIED)
+    next_week = MacroEvent(date(2026, 8, 20), "Initial Jobless Claims", "Medium",
+                           "FRED release calendar (BLS/BEA/Census)", VERIFIED)
+    notes = suppressed_gates(
+        {"The trader's reasoning": "Wait for jobless claims before adding."},
+        [last_week, next_week],
+        as_of=AS_OF,
+    )
+    assert notes == []
+
+
+def test_without_a_market_date_only_confidence_is_checked():
+    """Every caller before this change passed two arguments; none regressed."""
+    assert suppressed_gates(
+        {"The verdict summary": "Enter after Retail Sales confirms the consumer."},
+        [PRINTED_RETAIL],
+    ) == []
 
 
 def test_a_release_with_no_date_at_all_cannot_be_waited_for():
