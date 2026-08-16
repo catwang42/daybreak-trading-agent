@@ -225,6 +225,20 @@ Deliberate deviations:
   service holding the content, and attaches the markdown and the per-ticker deep reports
   alongside the inline HTML. The trade is that push-to-phone becomes whatever the mail
   client does, and there is no read receipt.
+- **Reflection is an audited ledger, not a vector store (M7).** Upstream's
+  `graph/reflection.py` and `agents/utils/memory.py` embed past decisions and their P&L
+  and recall similar situations into each researcher's prompt. We took the measurement
+  half and left the recall half out. `evaluation/` records the full pre-selection pool,
+  the provenance of the code that produced each row, and the resolved excess return at
+  five horizons, then grades sources on **lift over the price-only screen** — a number an
+  embedding lookup cannot produce, and the one that decides whether a source graduates out
+  of SHADOW. Nothing is fed back into a prompt: a recalled "similar situation" is an
+  unfalsifiable influence on a decision, and the point of the ledger is that every
+  influence on the shortlist is attributable. Cost: the researchers do not learn from last
+  month. Benefit: we can say whether last month worked, and the ±1/±3/±5 ladder stays the
+  only path from evidence to influence. This is the M2 bullet above ("Deferred to M3")
+  finally answered — deferred twice, because grading needs the as-of-safe snapshot
+  machinery M6 built.
 - **Deep reports are attached rather than inlined.** Gmail clips a message body over
   ~102 KB behind a "view entire message" link, and the brief alone is ~75 KB. Inlining
   five deep reports would push the mandatory disclaimer footer behind that link, which is
