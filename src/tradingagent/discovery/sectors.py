@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from ..data.market import Quote
+from ..semantics import SECTOR_ROTATION, Reading
 from ..data.universe import (
     COMMODITY_SECTORS,
     CYCLICAL_SECTORS,
@@ -37,6 +38,18 @@ from ..data.universe import (
 # thresholds are the upstream bands rescaled to our metric.
 OVERBOUGHT_THRESHOLD = 0.80
 OVERSOLD_THRESHOLD = 0.20
+
+#: How each phase is allowed to be written. The table matches today's leaders
+#: and laggards against a textbook rotation; that is a resemblance between two
+#: lists of sectors, not a reading of the economy, so the words say so.
+#: See :mod:`tradingagent.semantics`.
+ROTATION_PATTERN: dict[str, str] = {
+    "Early Cycle Recovery": "early-cycle-like",
+    "Mid Cycle Expansion": "mid-cycle-like",
+    "Late Cycle": "late-cycle-like",
+    "Recession": "defensive-leadership-like",
+    "Undetermined": "no recognisable pattern",
+}
 
 CYCLE_PHASES: dict[str, dict[str, list[str]]] = {
     "Early Cycle Recovery": {
@@ -93,6 +106,14 @@ class SectorMap:
 
     def laggards(self, n: int = 3) -> list[SectorRow]:
         return sorted(self.rows, key=lambda r: r.momentum)[:n]
+
+    def rotation_reading(self) -> Reading:
+        """The rotation pattern, in the only words it may be described with."""
+        return Reading(
+            term=SECTOR_ROTATION,
+            value=ROTATION_PATTERN.get(self.cycle_phase, "no recognisable pattern"),
+            basis=f"match confidence {self.cycle_confidence}",
+        )
 
 
 def bucket_for(sector: str) -> str:

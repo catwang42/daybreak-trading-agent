@@ -116,6 +116,7 @@ def run_portfolio_manager(
     risk: RiskReview,
     degraded: DegradedTracker,
     proposal_error: str | None = None,
+    trade_plan=None,
 ) -> tuple[PortfolioDecision | None, str | None]:
     """One DEEP-tier call. Returns ``(decision, error)``; never raises."""
     checklist, confirmed, total = confidence_checklist(evidence, analysts, debate, proposal, risk)
@@ -129,7 +130,7 @@ def run_portfolio_manager(
         analyst_digest=analyst_digest(analysts),
         debate_summary=debate.summary(),
         plan=render_plan(debate.plan, debate.plan_error),
-        proposal=render_proposal(proposal, proposal_error),
+        proposal=render_proposal(proposal, proposal_error, plan=trade_plan),
         risk_debate=f"{risk.transcript()}\n\nAdjustments on the table:\n{risk.adjustments()}",
         price_context=evidence.price_context(),
         market_context=evidence.market_context,

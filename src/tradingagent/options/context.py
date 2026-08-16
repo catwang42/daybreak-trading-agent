@@ -20,10 +20,17 @@ from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
 
+from .levels import ENTRY, INVALIDATION, TARGET, PriceLevel, classify
+
 log = logging.getLogger(__name__)
 
 CONTEXT_FILENAME = "options-context.json"
-SCHEMA_VERSION = 1
+# v2 (M6) names the research snapshot every spot and level below was taken
+# from, so the overlay can say which moment its strikes are anchored to.
+# v3 (M6) types the levels: a chart level a strike may be anchored to is no
+# longer the same kind of thing as the equity plan's invalidation or target,
+# which are constraints on a strike. See :mod:`.levels`.
+SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -39,9 +46,10 @@ class VerdictRow:
     executive_summary: str = ""
     invalidation: str = ""
     spot: float | None = None
-    #: Named price levels, e.g. {"50-day SMA": 31.84}. Names are printed in the
-    #: report, so they are written the way a human would say them.
-    levels: dict[str, float | None] = field(default_factory=dict)
+    #: Typed price levels: chart levels a strike may be anchored to, plus the
+    #: equity plan's entry, invalidation and target, which constrain one. Stored
+    #: as dicts so the context stays plain JSON; read via :meth:`price_levels`.
+    levels: list[dict] = field(default_factory=list)
     #: The rendered price block the deep roles argued over, reused verbatim so
     #: the strategist anchors to the same levels the equity thesis did.
     price_context: str = ""
@@ -50,12 +58,21 @@ class VerdictRow:
     dividend_yield_pct: float | None = None
     degraded: bool = False
 
+    def price_levels(self) -> list[PriceLevel]:
+        return [PriceLevel.from_dict(raw) for raw in self.levels]
+
 
 @dataclass
 class OptionsContext:
     run_date: str
     data_as_of: str = "unknown"
     verdicts: list[VerdictRow] = field(default_factory=list)
+    #: The research snapshot the spots and levels below came from. The option
+    #: chain is deliberately fresher than this — see
+    #: :meth:`tradingagent.snapshot.ResearchSnapshot.derive` — and the overlay
+    #: prints both moments rather than pretending they are one.
+    snapshot_id: str = ""
+    market_as_of: str = ""
     version: int = SCHEMA_VERSION
 
     def to_json(self) -> str:
@@ -112,23 +129,31 @@ LEVEL_LABELS: list[tuple[str, str]] = [
 ]
 
 
-def levels_from(result) -> dict[str, float | None]:
-    """Pull the strike anchors out of a finished :class:`DeepResult`.
+def levels_from(result) -> list[PriceLevel]:
+    """Pull the levels out of a finished :class:`DeepResult`, each with its role.
 
     Kept here rather than in the deep pipeline because these are the options
     stage's requirements, and the deep stage should not have to know them.
+
+    Chart levels are classified by the side of the market they sit on. The
+    equity plan's own levels keep their meaning: an invalidation is not a
+    support a strike may be parked on, it is the line assignment must stay
+    below (see :mod:`.levels`).
     """
-    levels: dict[str, float | None] = {}
+    levels: list[PriceLevel] = []
     evidence = getattr(result, "evidence", None)
     indicators = getattr(evidence, "indicators", None)
+    spot = getattr(evidence, "price", None)
     if indicators is not None:
+        spot = spot or float(indicators.close)
         for key, label in LEVEL_LABELS:
             value = indicators.get(key)
             if value:
-                levels[label] = float(value)
+                levels.append(PriceLevel(label, float(value), classify(label, float(value), spot), key))
         atr = indicators.get("atr")
         if atr:
-            levels["2-ATR band"] = float(indicators.close) - 2 * float(atr)
+            band = float(indicators.close) - 2 * float(atr)
+            levels.append(PriceLevel("2-ATR band", band, classify("2-ATR band", band, spot), "atr"))
 
     screener = getattr(result.queued, "screener", {}) or {}
     for key, label in (("stop_ref", "screener stop reference"), ("entry_ref", "screener entry reference")):
@@ -137,16 +162,35 @@ def levels_from(result) -> dict[str, float | None]:
         except (TypeError, ValueError):
             continue
         if value > 0:
-            levels[label] = value
+            levels.append(PriceLevel(label, value, classify(label, value, spot), f"screener.{key}"))
+
+    # The plan the risk seats argued over, not the prose around it.
+    plan = getattr(result, "trade_plan", None)
+    for attr, role, label in (
+        ("entry", ENTRY, "planned entry"),
+        ("stop", INVALIDATION, "planned invalidation"),
+        ("target", TARGET, "planned target"),
+    ):
+        value = getattr(plan, attr, None)
+        if value:
+            levels.append(PriceLevel(label, float(value), role, "trade plan"))
 
     decision = getattr(result, "decision", None)
     target = getattr(decision, "price_target", None)
-    if target:
-        levels["portfolio manager price target"] = float(target)
+    if target and not any(lv.role == TARGET for lv in levels):
+        levels.append(
+            PriceLevel("portfolio manager price target", float(target), TARGET, "portfolio manager")
+        )
     return levels
 
 
-def build_options_context(results, run_date: date, data_as_of: str = "unknown") -> OptionsContext:
+def build_options_context(
+    results,
+    run_date: date,
+    data_as_of: str = "unknown",
+    snapshot_id: str = "",
+    market_as_of: str = "",
+) -> OptionsContext:
     """Freeze what the options stage needs out of a finished deep run.
 
     Tickers whose deep dive produced no verdict are carried with
@@ -170,7 +214,7 @@ def build_options_context(results, run_date: date, data_as_of: str = "unknown") 
                 executive_summary=decision.executive_summary if decision else "",
                 invalidation=decision.invalidation if decision else "",
                 spot=getattr(evidence, "price", None),
-                levels=levels_from(result),
+                levels=[lv.to_dict() for lv in levels_from(result)],
                 price_context=evidence.price_context() if evidence else "",
                 earnings_note=result.queued.earnings_note,
                 dividend_yield_pct=getattr(fundamentals, "dividend_yield", None),
@@ -178,5 +222,9 @@ def build_options_context(results, run_date: date, data_as_of: str = "unknown") 
             )
         )
     return OptionsContext(
-        run_date=run_date.isoformat(), data_as_of=data_as_of, verdicts=rows
+        run_date=run_date.isoformat(),
+        data_as_of=data_as_of,
+        verdicts=rows,
+        snapshot_id=snapshot_id,
+        market_as_of=market_as_of,
     )

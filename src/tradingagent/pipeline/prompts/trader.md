@@ -23,14 +23,27 @@ Propose the transaction.
   through size and entry condition. If you genuinely believe the plan is wrong,
   say so in your reasoning and still respect it in `action`; the portfolio
   manager arbitrates, not you.
-- **Levels come from the chart, not from round numbers.** Anchor
-  `entry_price` on the actual reference level in the evidence and `stop_loss`
-  below a structural level, so the resulting risk per share is defensible. If
-  the evidence does not support a level, return null rather than a guess.
-- **Size for the risk, not for the conviction.** State sizing as a percentage of
-  portfolio, and let a wide stop or a hostile tape shrink it.
+- **You give levels; the pipeline does the arithmetic.** Set
+  `invalidation_level` to the price at which this trade is wrong — a swing low,
+  a moving average, a band edge that appears in the evidence above — and say
+  which kind it is in `invalidation_type`. Set `entry_type` to `market` unless
+  you want to wait, in which case name the `entry_level` you are waiting for.
+  If the evidence supports no level, return null rather than a round number:
+  a 2-ATR stop is computed for you and labelled as such.
+- **Do not compute risk percentages, position sizes or reward:risk ratios.**
+  Entry, stop, risk per share, risk %, R multiple and the size cap are computed
+  from your levels against the run's snapshot and printed beside your reasoning.
+  A number you quote here that disagrees with them is printed as a correction.
+- **Size for the risk, not for the conviction.** Express caution through the
+  entry condition and the stop, not through a percentage of portfolio.
 - **Respect event risk.** An earnings print inside the horizon changes the
   entry, the size, or both.
+- **Only wait for a date marked VERIFIED.** Every macro release in the evidence
+  carries the confidence class of its source. A VERIFIED date came from the
+  issuing agency and may be waited for; an INDICATIVE one is a weekday-of-month
+  guess, and STALE or MISSING means we do not know when the release lands.
+  Writing "wait for Thursday's PPI" against anything but a VERIFIED date is a
+  wrong instruction, and the pipeline strikes it from the plan.
 
 Keep `reasoning` to a few sentences that a human could act on without rereading
 the whole file.

@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from ..semantics import BREADTH_CYCLE_POSITION, BREADTH_POSTURE, Reading
+
 COMPONENT_WEIGHTS: dict[str, float] = {
     "breadth_level_trend": 0.25,
     "ma_crossover": 0.20,
@@ -30,7 +32,7 @@ COMPONENT_WEIGHTS: dict[str, float] = {
 COMPONENT_LABELS: dict[str, str] = {
     "breadth_level_trend": "Breadth Level & Trend",
     "ma_crossover": "8MA vs 200MA Crossover",
-    "cycle_position": "Peak/Trough Cycle Position",
+    "cycle_position": "Breadth cycle position (peak/trough of the breadth series)",
     "bearish_signal": "Bearish Signal Status",
     "historical_percentile": "Historical Percentile",
     "divergence": "S&P 500 Divergence",
@@ -67,6 +69,31 @@ class BreadthResult:
     universe_size: int = 0
     data_quality: str = ""
     history_sessions: int = 0
+
+    def posture_reading(self) -> Reading:
+        """Zone and posture together, with the exposure band marked unvalidated.
+
+        The band comes from the upstream skill's health-zone table and has
+        never been checked against an outcome here. It is context; the position
+        size that may actually be acted on is computed per trade in
+        :mod:`tradingagent.pipeline.trade_plan`.
+        """
+        return Reading(
+            term=BREADTH_POSTURE,
+            value=f"{self.zone} — {self.guidance} Heuristic exposure band {self.exposure}",
+            basis=f"composite {self.composite}/100",
+        )
+
+    def cycle_position_reading(self) -> Reading | None:
+        """The component a report once called a valuation."""
+        for component in self.components:
+            if component.key == "cycle_position":
+                return Reading(
+                    term=BREADTH_CYCLE_POSITION,
+                    value=component.signal if component.available else "no data",
+                    basis=f"component score {component.score:.0f}/100",
+                )
+        return None
 
     @property
     def history_note(self) -> str:

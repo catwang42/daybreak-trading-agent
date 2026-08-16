@@ -12,7 +12,7 @@
 1. Verdict: **Buy / Overweight / Hold / Underweight / Sell** + soft price target + confidence (L/M/H)
 2. Analyst summaries (fundamentals / technical / news / sentiment — max 1 paragraph each)
 3. Bull vs Bear — strongest argument each side + arbiter's resolution
-4. Trade proposal (trader)
+4. Trade proposal — trader's intent (action, entry condition, invalidation) + the plan table computed by the pipeline (entry | stop | risk/share | risk % | target | reward:risk | size cap), or `NO TRADE — inconsistent plan`
 5. Risk review — aggressive/conservative/neutral takes + judge's ruling
 6. Options view (M4+)
 7. Data sources used + timestamps

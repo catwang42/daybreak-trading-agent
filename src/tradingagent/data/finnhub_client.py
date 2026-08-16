@@ -12,12 +12,23 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 
 from ..config import Settings
+from .entity import resolve
 from .validate import DegradedTracker
 
 log = logging.getLogger(__name__)
+
+#: Company-news lookback, in calendar days. Upstream TradingAgents uses the
+#: same seven days; what is ours is that the window ends at the snapshot's
+#: market date rather than at whatever "today" happens to be when the call runs.
+NEWS_WINDOW_DAYS = 7
+
+
+def news_window(as_of: date, days: int = NEWS_WINDOW_DAYS) -> tuple[date, date]:
+    """The ``(start, end)`` a caller should ask for, given an as-of date."""
+    return as_of - timedelta(days=days), as_of
 
 
 @dataclass
@@ -42,6 +53,53 @@ class NewsItem:
     source: str
     url: str
     datetime_utc: int
+    #: How strongly the headline itself says it is about ``symbol``, and why.
+    #: ``None`` only for an item nobody resolved. See
+    #: :mod:`tradingagent.data.entity` — the feed's tag is not evidence.
+    relevance: float | None = None
+    match_basis: str = ""
+
+    @property
+    def attributable(self) -> bool:
+        """May this be presented, or scored, as news about ``symbol``?"""
+        from .entity import MIN_TONE_RELEVANCE
+
+        return self.relevance is None or self.relevance >= MIN_TONE_RELEVANCE
+
+    @property
+    def published_at(self) -> date | None:
+        """The UTC day the story was filed, or ``None`` when the feed omits it."""
+        if not self.datetime_utc:
+            return None
+        try:
+            return datetime.fromtimestamp(self.datetime_utc, tz=timezone.utc).date()
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    def to_dict(self) -> dict:
+        return {
+            "symbol": self.symbol,
+            "headline": self.headline,
+            "source": self.source,
+            "url": self.url,
+            "datetime_utc": self.datetime_utc,
+            "relevance": self.relevance,
+            "match_basis": self.match_basis,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "NewsItem":
+        return cls(
+            symbol=str(raw.get("symbol", "")),
+            headline=str(raw.get("headline", "")),
+            source=str(raw.get("source", "")),
+            url=str(raw.get("url", "")),
+            datetime_utc=int(raw.get("datetime_utc") or 0),
+            relevance=(
+                float(raw["relevance"]) if raw.get("relevance") is not None else None
+            ),
+            match_basis=str(raw.get("match_basis", "")),
+        )
 
 
 class FinnhubFree:
@@ -141,11 +199,27 @@ class FinnhubFree:
             self.degraded.add("Finnhub economic calendar", "no events in window")
         return rows
 
-    def company_news(self, symbol: str, days: int = 7, limit: int = 5) -> list[NewsItem]:
+    def company_news(
+        self, symbol: str, start_date: date, end_date: date, limit: int = 5
+    ) -> list[NewsItem]:
+        """Headlines in an explicit window, filtered to end at ``end_date``.
+
+        The window used to be ``days`` back from ``date.today()``, which meant
+        a ``--date 2026-06-01`` re-run read June's prices against August's
+        headlines and called it analysis. The caller passes the snapshot's
+        market date; Finnhub's ``to`` is a date and its rows carry a UTC
+        timestamp, so the tail of the window is trimmed here as well as asked
+        for — a same-day story filed after the close is still the future
+        relative to a close-priced snapshot.
+        """
         if not self.enabled:
             return []
-        end = date.today()
-        start = end - timedelta(days=days)
+        start, end = start_date, end_date
+        # End of the market date, UTC. Anything stamped later is not evidence
+        # the snapshot could have seen.
+        cutoff = int(
+            datetime.combine(end, time.max, tzinfo=timezone.utc).timestamp()
+        )
         try:
             payload = self._get_client().company_news(
                 symbol, _from=start.isoformat(), to=end.isoformat()
@@ -164,8 +238,31 @@ class FinnhubFree:
             for r in (payload or [])
             if str(r.get("headline", "")).strip()
         ]
+        fresh = [n for n in items if n.datetime_utc and n.datetime_utc > cutoff]
+        if fresh:
+            # Not degraded — the provider answered. Logged because a run that
+            # trims a lot of headlines is a run someone should look at.
+            log.info(
+                "Finnhub news %s: dropped %d headline(s) stamped after %s",
+                symbol, len(fresh), end.isoformat(),
+            )
+        # An undated headline is kept: it is more likely a provider gap than a
+        # future story, and it is visibly "undated" everywhere it is printed.
+        items = [n for n in items if not n.datetime_utc or n.datetime_utc <= cutoff]
         items.sort(key=lambda n: n.datetime_utc, reverse=True)
-        return items[:limit]
+        return [resolve_item(n) for n in items[:limit]]
+
+
+def resolve_item(item: NewsItem) -> NewsItem:
+    """Stamp a headline with how well it matches the symbol it arrived under.
+
+    Every company-news row is feed-tagged by definition — we asked for that
+    symbol — and that tag is exactly what has to stop being treated as proof.
+    """
+    match = resolve(item.headline, item.symbol, feed_tagged=True)
+    item.relevance = match.relevance
+    item.match_basis = match.basis
+    return item
 
 
 def _num(value) -> float | None:

@@ -45,6 +45,14 @@ Pick one contract, or none.
   ask whether that is the entry the equity thesis wanted, at what cost basis.
   For a call, assume you are called away and ask whether that ends the position
   on acceptable terms.
+- **A candidate that disagrees with the equity plan must be described that way.**
+  A note beginning "Disagrees with the equity plan" or
+  "acquire-after-setup-failure" means the strike contradicts the levels the
+  equity work settled on: a put that would assign at or above the invalidation
+  is not an entry, it is a decision to buy a failed setup, and a call struck
+  under the base-case target sells the upside the thesis is built on. You may
+  still pick it, but say so plainly in `rationale` and `assignment_view`.
+  Presenting it as if the conflict did not exist is the one thing you may not do.
 - **Recommend 'none' when that is the honest answer.** A thin, stale, or
   badly-placed set of candidates is a reason to skip the overlay, not to pick
   the least-bad row. Say why in `rationale`.

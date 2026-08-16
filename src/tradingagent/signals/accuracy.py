@@ -21,9 +21,19 @@ The dead band matters. A ±1% move over a week is noise, and grading a source
 against noise teaches it nothing; those samples are dropped rather than
 counted as misses.
 
-Small samples are the real hazard: three lucky calls is 100% accuracy and
-means nothing. Weights are shrunk towards 1.0 in proportion to how little
-evidence there is, so a source needs a sustained record to gain or lose much.
+Small samples are the real hazard, and the first version of this module got
+the cold start exactly backwards. A source with no record scored weight 1.0 —
+full trust — and shrinkage pulled *towards* that, so "we have never checked
+this source" and "this source is reliably average" produced the same number.
+Four of ten names on a recent shortlist entered on the strength of signals
+that had never been graded once.
+
+So the cold start is inverted here. A source starts at weight 0: it is
+computed, journaled and shown, but it moves nothing. It earns influence by
+resolving observations, on a ladder (:data:`GRADUATION`) that caps how far it
+may move a candidate's score — ±1 point at 20 resolved calls, ±3 at 50, ±5 at
+100. The old ±8 is reachable only for a source a human has reviewed and marked
+``proven``; no code path sets that flag.
 """
 
 from __future__ import annotations
@@ -43,9 +53,21 @@ DEAD_BAND_PCT = 1.0
 WINDOW_DAYS = 90
 #: Samples needed before a source's record is trusted at full strength.
 FULL_CONFIDENCE_SAMPLES = 20
-#: Weight bounds. A source can be halved or given half again, never silenced
-#: outright — that decision is the human's, by removing it from the registry.
+#: Weight bounds *once a source has graduated*. Below :data:`MIN_OBSERVATIONS`
+#: the weight is 0 regardless: an ungraded source has earned nothing, and the
+#: floor of 0.5 applies to a source we have measured and found poor.
 MIN_WEIGHT, MAX_WEIGHT = 0.5, 1.5
+
+#: Resolved directional calls a source needs before it may move the ranking at
+#: all. Below this it is SHADOW: computed, journaled, reported, ignored.
+MIN_OBSERVATIONS = 20
+#: (resolved observations, points this source may move a candidate's score).
+#: Ascending; the highest threshold a source clears is the one that applies.
+GRADUATION: tuple[tuple[int, float], ...] = ((20, 1.0), (50, 3.0), (100, 5.0))
+#: The original ceiling, now reachable only by a source that has cleared the
+#: top rung *and* been marked ``proven`` by a human in the scores file. Nothing
+#: in this module writes that flag — that is the point of it.
+PROVEN_MAX_ADJUSTMENT = 8.0
 
 SCORES_FILENAME = "source-accuracy.json"
 REFRESH_AFTER_DAYS = 7  # "scored weekly" (BUILD_PLAN.md Milestone 3)
@@ -57,26 +79,62 @@ class SourceScore:
     samples: int = 0
     hits: int = 0
     abstained: int = 0
+    #: Human override, read from the scores file and never written by code.
+    #: Only a source that has cleared the top rung and been reviewed by a
+    #: person may reach :data:`PROVEN_MAX_ADJUSTMENT`.
+    proven: bool = False
 
     @property
     def accuracy(self) -> float | None:
         return self.hits / self.samples if self.samples else None
 
     @property
+    def graduated(self) -> bool:
+        """Whether this source has earned any influence over the ranking."""
+        return self.samples >= MIN_OBSERVATIONS
+
+    @property
     def weight(self) -> float:
-        """Accuracy mapped to a multiplier, shrunk towards 1.0 on thin evidence."""
-        if not self.samples:
-            return 1.0
+        """Accuracy mapped to a multiplier, or 0 for a source with no record.
+
+        Zero rather than 1.0 below the threshold: an untested source is not a
+        neutral one, and treating it as neutral is what let ungraded signals
+        pick shortlist names.
+        """
+        if not self.graduated:
+            return 0.0
         raw = MIN_WEIGHT + (MAX_WEIGHT - MIN_WEIGHT) * (self.hits / self.samples)
         confidence = min(1.0, self.samples / FULL_CONFIDENCE_SAMPLES)
         return round(1.0 + (raw - 1.0) * confidence, 3)
 
+    @property
+    def max_adjustment(self) -> float:
+        """Points this source is allowed to move a candidate's screener score."""
+        earned = 0.0
+        for needed, points in GRADUATION:
+            if self.samples >= needed:
+                earned = points
+        if self.proven and self.samples >= GRADUATION[-1][0]:
+            return PROVEN_MAX_ADJUSTMENT
+        return earned
+
+    @property
+    def standing(self) -> str:
+        """How this source's record is described in the report."""
+        if not self.graduated:
+            return f"SHADOW ({self.samples}/{MIN_OBSERVATIONS} resolved)"
+        cap = f"±{self.max_adjustment:.0f} pts"
+        return f"{cap} (PROVEN)" if self.proven else cap
+
     def line(self) -> str:
-        if not self.samples:
-            return f"| {self.source} | no scored calls yet | {self.abstained} abstained | 1.000 |"
+        record = (
+            "no scored calls yet"
+            if not self.samples
+            else f"{self.hits}/{self.samples} ({self.accuracy:.0%})"
+        )
         return (
-            f"| {self.source} | {self.hits}/{self.samples} ({self.accuracy:.0%}) | "
-            f"{self.abstained} abstained | {self.weight:.3f} |"
+            f"| {self.source} | {record} | {self.abstained} abstained | "
+            f"{self.weight:.3f} | {self.standing} |"
         )
 
 
@@ -90,18 +148,36 @@ class AccuracyReport:
     def weights(self) -> dict[str, float]:
         return {name: score.weight for name, score in self.scores.items()}
 
+    def caps(self) -> dict[str, float]:
+        """Source -> the most it may move one candidate's screener score."""
+        return {name: score.max_adjustment for name, score in self.scores.items()}
+
+    @property
+    def graduated(self) -> list[str]:
+        return sorted(name for name, s in self.scores.items() if s.graduated)
+
     def markdown(self) -> str:
-        if not self.scores:
-            return (
-                "No journal entries carry signal readings with a resolved outcome yet. "
-                "Every source runs at weight 1.000 until the record exists."
-            )
-        rows = [
+        header = (
             f"Scored {self.scored_on.isoformat()} over the trailing {self.window_days} days "
-            f"({self.unresolved} entries still unresolved).",
+            f"({self.unresolved} entries still unresolved)."
+            if self.scores
+            else "No journal entries carry signal readings with a resolved outcome yet."
+        )
+        ladder = ", ".join(f"{n} obs → ±{p:.0f}" for n, p in GRADUATION)
+        rows = [
+            header,
             "",
-            "| Source | Directional calls correct | Abstentions | Weight |",
-            "|---|---|---|---:|",
+            f"A source moves the ranking only after {MIN_OBSERVATIONS} resolved directional "
+            f"calls, and then only as far as its record allows ({ladder} points; "
+            f"±{PROVEN_MAX_ADJUSTMENT:.0f} needs a human to mark it proven). Until then it is "
+            "SHADOW — computed, journaled and shown here, but worth zero points.",
+            "",
+        ]
+        if not self.scores:
+            return "\n".join(rows)
+        rows += [
+            "| Source | Directional calls correct | Abstentions | Weight | Ranking influence |",
+            "|---|---|---|---:|---|",
         ]
         rows += [self.scores[name].line() for name in sorted(self.scores)]
         return "\n".join(rows)
@@ -112,7 +188,12 @@ class AccuracyReport:
             "window_days": self.window_days,
             "unresolved": self.unresolved,
             "scores": {
-                name: {"samples": s.samples, "hits": s.hits, "abstained": s.abstained}
+                name: {
+                    "samples": s.samples,
+                    "hits": s.hits,
+                    "abstained": s.abstained,
+                    "proven": s.proven,
+                }
                 for name, s in self.scores.items()
             },
         }
@@ -129,6 +210,7 @@ class AccuracyReport:
                     samples=int(row.get("samples", 0)),
                     hits=int(row.get("hits", 0)),
                     abstained=int(row.get("abstained", 0)),
+                    proven=bool(row.get("proven", False)),
                 )
                 for name, row in (payload.get("scores") or {}).items()
             },
@@ -244,17 +326,29 @@ class AccuracyTracker:
         if not self.stale(report, run_date) and report is not None:
             return report
         if realised is None:
-            log.info("Source accuracy is stale but no price source was supplied; keeping weights at 1.0")
+            log.info(
+                "Source accuracy is stale but no price source was supplied; "
+                "every source stays in shadow"
+            )
             return report or AccuracyReport(scored_on=run_date, window_days=WINDOW_DAYS)
 
         from ..journal import read_entries
 
         fresh = score_entries(read_entries(self.journal_path), realised, run_date)
+        # `proven` is the one field a human writes into this file. Rescoring
+        # rewrites the file wholesale, so carry the flag forward or the next
+        # weekly run silently demotes a source someone deliberately promoted.
+        for name, score in fresh.scores.items():
+            previous = (report.scores.get(name) if report else None)
+            if previous is not None and previous.proven:
+                score.proven = True
         self.save(fresh)
         log.info(
             "Rescored signal sources over %d days: %s",
             fresh.window_days,
-            ", ".join(f"{n} {s.weight:.2f}" for n, s in sorted(fresh.scores.items())) or "no samples",
+            ", ".join(f"{n} weight {s.weight:.2f} cap ±{s.max_adjustment:.0f}"
+                      for n, s in sorted(fresh.scores.items()))
+            or "no samples",
         )
         return fresh
 

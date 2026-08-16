@@ -19,7 +19,9 @@ from ..discovery.screener import Candidate
 from ..discovery.sectors import SectorMap
 from ..discovery.shortlist import SIGNAL_POOL_MULTIPLE, ShortlistEntry
 from ..llm import TokenLedger
-from ..signals.bundle import MAX_SCORE_ADJUSTMENT
+from ..signals.accuracy import GRADUATION, MIN_OBSERVATIONS
+from ..signals.bundle import MAX_SCORE_ADJUSTMENT, ShadowRanking
+from ..snapshot import ResearchSnapshot, utcnow
 
 DISCLAIMER = (
     "Automated research output for personal study. Not financial advice. "
@@ -54,6 +56,12 @@ class ReportContext:
     signal_rows: list[tuple[str, str, str]] = field(default_factory=list)
     signal_backdrop: str = ""
     signal_accuracy: str = ""
+    #: The shortlist the shadowed signal layer would have picked (M6 item 1).
+    signal_shadow: ShadowRanking | None = None
+    #: The run's research snapshot (M6 item 2). Named in the footer so every
+    #: price in this brief, and in the deep reports it links to, can be traced
+    #: to one moment rather than to whenever each stage happened to fetch.
+    snapshot: ResearchSnapshot | None = None
     # Set once the deep stage has run in the same process (``--stage all``);
     # a standalone ``--stage deep`` patches this section on disk instead.
     deep_index: str | None = None
@@ -86,8 +94,10 @@ def _section_market_overview(ctx: ReportContext) -> str:
     b = ctx.breadth
     lines += [
         "",
-        f"**VIX** {_num(ctx.vix)} · **Breadth composite** {b.composite}/100 "
-        f"({b.zone}) · **Suggested equity exposure** {b.exposure}",
+        f"**VIX** {_num(ctx.vix)} · **Breadth composite** {b.composite}/100",
+        "",
+        f"**{b.posture_reading().describe()}** — an inherited heuristic, never validated "
+        "here, and not a position size. Sizes are computed per trade in section 4.",
         "",
         f"{_num(b.breadth_pct_above_50dma, 1)}% of the {b.universe_size}-name universe is above its "
         f"50-day MA; {_num(b.breadth_pct_above_200dma, 1)}% above its 200-day MA. "
@@ -112,25 +122,43 @@ def _component_label(key: str) -> str:
 def _section_macro(ctx: ReportContext) -> str:
     lines = ["## 2. Macro & Events Today", ""]
     cal = ctx.calendar
-    if not cal.macro_is_live:
+    if not cal.has_verified_dates:
         lines.append(
-            "> Economic calendar source is an **indicative static release schedule**, not a live "
-            "feed (no free live source available — see Degraded Sources). Confirm exact dates and "
-            "times before acting."
+            "> No authoritative release schedule was reachable this run, so every macro date "
+            "below is an **indicative approximation** from a weekday-of-month rule (see Degraded "
+            "Sources). None of them may be waited for; confirm dates and times before acting."
         )
         lines.append("")
 
     todays = [e for e in cal.macro if e.date == ctx.run_date]
     lines.append(
         "**Today:** "
-        + (", ".join(f"{e.name} ({e.impact})" for e in todays) if todays else "no scheduled US macro release.")
+        + (
+            ", ".join(f"{e.name} ({e.impact}, {e.confidence})" for e in todays)
+            if todays
+            else "no scheduled US macro release."
+        )
     )
     lines.append("")
-    upcoming = [e for e in cal.macro if e.date > ctx.run_date][:8]
+    upcoming = [e for e in cal.macro if e.date is None or e.date > ctx.run_date][:8]
     if upcoming:
-        lines += ["| Date | Event | Impact | Source |", "|---|---|---|---|"]
-        lines += [f"| {e.date} | {e.name} | {e.impact} | {e.source} |" for e in upcoming]
-        lines.append("")
+        lines += [
+            "| Date | Event | Impact | Confidence | Source | May gate an entry? |",
+            "|---|---|---|---|---|---|",
+        ]
+        lines += [
+            f"| {e.date.isoformat() if e.date else '—'} | {e.name} | {e.impact} | "
+            f"**{e.confidence}** | {e.source} | {'yes' if e.may_gate_entries else 'no'} |"
+            for e in upcoming
+        ]
+        lines += [
+            "",
+            "_Only a **VERIFIED** date — one published by the issuing agency — may gate an entry "
+            "or an options event-risk decision. INDICATIVE dates come from a weekday-of-month "
+            "rule and are context only; STALE means we know when it last printed, not when it "
+            "next will; MISSING means no source answered._",
+            "",
+        ]
 
     if cal.earnings_today:
         names = ", ".join(f"{e.symbol} ({e.timing})" for e in cal.earnings_today[:20])
@@ -155,7 +183,8 @@ def _section_sectors(ctx: ReportContext) -> str:
         "## 3. Sector Opportunity Map",
         "",
         f"**Risk regime:** {s.risk_regime} (cyclical−defensive momentum spread {s.risk_score:+.2f}) · "
-        f"**Estimated cycle phase:** {s.cycle_phase} (confidence {s.cycle_confidence})",
+        f"**{s.rotation_reading().describe()}** — a resemblance between today's sector "
+        "leaders and a fixed table, not a reading of the economy",
         "",
         "| Sector | ETF | Bucket | % above 50DMA | 1d | 5d | 1mo | 3mo | Status |",
         "|---|---|---|---:|---:|---:|---:|---:|---|",
@@ -184,6 +213,68 @@ def _section_sectors(ctx: ReportContext) -> str:
     return "\n".join(lines)
 
 
+def _shadow_block(ctx: ReportContext) -> list[str]:
+    """What the signal layer did, and — while it is shadowed — what it wanted to do.
+
+    Every source is currently worth zero ranking points, so the honest header
+    is not "what the signals moved" but "what they would have moved". The two
+    columns are kept side by side deliberately: the gap between them is the
+    only evidence that will justify graduating a source later, and hiding it
+    would leave the decision to intuition again.
+    """
+    size = len(ctx.shortlist)
+    shadowed = [e for e in ctx.shortlist if e.is_shadow]
+    applied = [e for e in ctx.shortlist if abs(e.score_adjustment) >= 0.05]
+    ladder = ", ".join(f"{n}→±{p:.0f}" for n, p in GRADUATION)
+
+    lines = [
+        "**SHADOW — the signal layer does not pick names.** The screener ranks the whole pool "
+        f"on price action alone and the shortlist is its top {size}. Signals are still "
+        f"collected over the top {size * SIGNAL_POOL_MULTIPLE}, scored and journaled, but a "
+        f"source is worth 0 ranking points until it has {MIN_OBSERVATIONS} resolved directional "
+        f"calls in the journal, and then only {ladder} points (±{MAX_SCORE_ADJUSTMENT:.0f} once "
+        "proven). No source has graduated yet."
+        if shadowed or not applied
+        else "**What the signals moved.** Sources that have earned ranking influence "
+        "contributed the points below; the rest are shadowed at 0.",
+        "",
+    ]
+
+    if ctx.signal_shadow is not None:
+        lines += [f"_{ctx.signal_shadow.note()}_", ""]
+
+    rows = [e for e in ctx.shortlist if abs(e.shadow_adjustment) >= 0.05 or abs(e.score_adjustment) >= 0.05]
+    if not rows:
+        lines += ["No ticker-level signal fired strongly enough to have moved a score, "
+                  "shadowed or not.", ""]
+        return lines
+
+    lines += [
+        "| Ticker | Screener score | Screener rank | Applied adj. | Shadow adj. | Would the shadow have changed this name's place? |",
+        "|---|---:|---:|---:|---:|---|",
+    ]
+    would = set(ctx.signal_shadow.would_promote) if ctx.signal_shadow else set()
+    for e in rows:
+        if e.symbol in would:
+            note = "**yes** — the shadow ranking promotes it"
+        elif ctx.signal_shadow and e.symbol in ctx.signal_shadow.would_drop:
+            note = "**yes** — the shadow ranking drops it"
+        else:
+            note = "no"
+        lines.append(
+            f"| **{e.symbol}** | {e.candidate.score} | {e.screen_rank or '—'} | "
+            f"{e.score_adjustment:+.1f} | {e.shadow_adjustment:+.1f} | {note} |"
+        )
+    lines += [
+        "",
+        "_Ordering within the shortlist below is set first by the quick take's priority and "
+        "rating and then interleaved by sector momentum, so a name's position there is not a "
+        "signal-layer effect. Neither, while the layer is shadowed, is its membership._",
+        "",
+    ]
+    return lines
+
+
 def _signal_layer(ctx: ReportContext) -> str:
     """The 4.x subsections: what each source said, what it moved, what it has earned.
 
@@ -198,42 +289,7 @@ def _signal_layer(ctx: ReportContext) -> str:
     lines += [f"| {name} | {coverage} | {status} |" for name, coverage, status in ctx.signal_rows]
     lines.append("")
 
-    moved = [e for e in ctx.shortlist if abs(e.score_adjustment) >= 0.05]
-    if moved:
-        size = len(ctx.shortlist)
-        promoted = [e for e in moved if e.screen_rank > size]
-        lines += [
-            "**What the signals moved.** The screener ranks the whole pool on price action "
-            f"alone; the shortlist is then picked from its top {size * SIGNAL_POOL_MULTIPLE} by "
-            f"screener score plus the signal adjustment, which is capped at "
-            f"±{MAX_SCORE_ADJUSTMENT:.0f} points. So the layer decides *who makes this list*, "
-            "and never overrides the price screen.",
-            "",
-            "| Ticker | Screener score | Screener rank | Signal adj. | Adjusted | Made the list because of signals |",
-            "|---|---:|---:|---:|---:|---|",
-        ]
-        for e in moved:
-            gained = e.screen_rank > size
-            note = f"**yes** — screener had it {e.screen_rank}th, outside the top {size}" if gained else "no"
-            lines.append(
-                f"| **{e.symbol}** | {e.candidate.score} | {e.screen_rank or '—'} | "
-                f"{e.score_adjustment:+.1f} | {e.adjusted_score:.1f} | {note} |"
-            )
-        lines += [
-            "",
-            f"{len(promoted)} of {size} shortlisted names were promoted past the screener's own "
-            "cut by the signal layer."
-            if promoted
-            else "No name was promoted past the screener's own cut this run; the adjustments "
-            "only reordered names the screener had already selected.",
-            "",
-            "_Ordering within the shortlist below is set first by the quick take's priority and "
-            "rating and then interleaved by sector momentum, so a name's position there is not "
-            "a signal-layer effect. Membership and tie-breaking are._",
-            "",
-        ]
-    else:
-        lines += ["No ticker-level signal was strong enough to move a score this run.", ""]
+    lines += _shadow_block(ctx)
 
     if ctx.signal_backdrop:
         lines += [ctx.signal_backdrop, ""]
@@ -353,8 +409,26 @@ def _footer(ctx: ReportContext) -> str:
         "### Run footer",
         "",
         f"- **Stage:** {ctx.stage} · **Runtime:** {ctx.runtime_seconds:.1f}s · "
-        f"**Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        f"**Generated:** {utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
         f"- **Market data as of:** {ctx.data_as_of} · **Session:** {ctx.session_note}",
+    ]
+    if ctx.snapshot is not None:
+        snap = ctx.snapshot
+        lines.append(
+            f"- **Research snapshot:** {snap.label} · universe `{snap.universe_version}` · "
+            f"{snap.data_quality.line()}"
+        )
+        lines.append(
+            "  Every price in this brief and in the deep reports it links to comes from this "
+            "one snapshot. The options overlay prices premiums against a second, named "
+            "snapshot — section 6 says which."
+        )
+        if snap.violations:
+            lines.append(
+                f"- **Snapshot violations:** {len(snap.violations)} — "
+                + "; ".join(snap.violations[:3])
+            )
+    lines += [
         "",
         "| LLM tier | Model | Calls | Prompt tok | Completion tok | Total tok | Est. cost |",
         "|---|---|---:|---:|---:|---:|---:|",

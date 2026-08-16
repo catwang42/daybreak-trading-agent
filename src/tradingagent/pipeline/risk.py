@@ -84,12 +84,13 @@ def run_risk_committee(
     rounds: int = 1,
     plan_error: str | None = None,
     proposal_error: str | None = None,
+    trade_plan=None,
 ) -> RiskReview:
     """Aggressive → Conservative → Neutral, each reading the transcript so far."""
     review = RiskReview()
     digest = analyst_digest(analysts)
     plan_md = render_plan(plan, plan_error)
-    proposal_md = render_proposal(proposal, proposal_error)
+    proposal_md = render_proposal(proposal, proposal_error, plan=trade_plan)
 
     for round_number in range(1, max(1, rounds) + 1):
         for seat, prompt_name in SEATS:

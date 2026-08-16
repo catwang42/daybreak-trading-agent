@@ -102,7 +102,7 @@ def test_synonym_stuffing_does_not_beat_a_clear_single_signal():
 class FakeFinnhub:
     enabled = False
 
-    def company_news(self, symbol, days, limit):
+    def company_news(self, symbol, start_date, end_date, limit=5):
         return []
 
 
@@ -399,9 +399,17 @@ def test_market_wide_signals_cannot_reorder_the_shortlist():
     assert bundle.score_adjustment() == 0.0
 
 
+def _graduated(sources, weight=1.0, cap=MAX_SCORE_ADJUSTMENT):
+    """Weights and caps for sources that have earned their influence."""
+    return {"weights": {s: weight for s in sources}, "caps": {s: cap for s in sources}}
+
+
 def test_the_adjustment_is_clamped_so_signals_cannot_override_the_price_screen():
     unanimous = [sig(source=f"s{i}", direction=1, strength=1.0) for i in range(6)]
-    bundle = SignalBundle(symbol="TST", run_date=RUN, ticker_signals=unanimous)
+    bundle = SignalBundle(
+        symbol="TST", run_date=RUN, ticker_signals=unanimous,
+        **_graduated([f"s{i}" for i in range(6)]),
+    )
     assert bundle.score_adjustment() == pytest.approx(MAX_SCORE_ADJUSTMENT)
 
 
@@ -416,11 +424,77 @@ def test_disagreeing_sources_cancel():
 
 def test_accuracy_weights_scale_a_sources_influence():
     signals = [sig(source="trusted", direction=1, strength=1.0)]
-    plain = SignalBundle(symbol="TST", run_date=RUN, ticker_signals=signals)
+    plain = SignalBundle(
+        symbol="TST", run_date=RUN, ticker_signals=signals, **_graduated(["trusted"])
+    )
     demoted = SignalBundle(
-        symbol="TST", run_date=RUN, ticker_signals=signals, weights={"trusted": 0.5}
+        symbol="TST", run_date=RUN, ticker_signals=signals,
+        **_graduated(["trusted"], weight=0.5),
     )
     assert demoted.score_adjustment() == pytest.approx(plain.score_adjustment() * 0.5)
+
+
+# --- shadow mode (M6 item 1) --------------------------------------------
+
+
+def test_an_ungraded_source_moves_nothing_however_loudly_it_fires():
+    """The cold-start bug: an unmeasured source used to arrive at weight 1.0,
+    which is how four of ten shortlist names entered on signals nobody had
+    ever checked."""
+    bundle = SignalBundle(
+        symbol="TST", run_date=RUN,
+        ticker_signals=[sig(source="news_tone", direction=1, strength=1.0)],
+    )
+    assert bundle.weight_for("news_tone") == 0.0
+    assert bundle.max_adjustment == 0.0
+    assert bundle.score_adjustment() == 0.0
+    assert bundle.is_shadow
+
+
+def test_the_shadow_figure_records_what_the_layer_wanted_to_do():
+    bundle = SignalBundle(
+        symbol="TST", run_date=RUN,
+        ticker_signals=[sig(source="news_tone", direction=1, strength=1.0)],
+    )
+    assert bundle.shadow_adjustment() == pytest.approx(MAX_SCORE_ADJUSTMENT)
+    assert "SHADOW — would have changed: +8.0 pts" in bundle.summary()
+    assert "SHADOW — would have changed" in bundle.ticker_block()
+
+
+def test_a_direction_is_still_read_and_journaled_while_shadowed():
+    """Shadowing must not stop the grading, or no source could ever graduate."""
+    bundle = SignalBundle(
+        symbol="TST", run_date=RUN,
+        ticker_signals=[sig(source="news_tone", direction=-1, strength=0.9)],
+    )
+    assert bundle.readings() == {"news_tone": -1}
+    assert bundle.net_direction() == -1
+
+
+def test_a_graduated_source_is_capped_by_its_own_rung_not_the_ceiling():
+    signals = [sig(source="earned", direction=1, strength=1.0)]
+    bundle = SignalBundle(
+        symbol="TST", run_date=RUN, ticker_signals=signals, **_graduated(["earned"], cap=3.0)
+    )
+    assert bundle.score_adjustment() == pytest.approx(3.0)
+    assert bundle.shadow_adjustment() == pytest.approx(MAX_SCORE_ADJUSTMENT)
+    assert not bundle.is_shadow
+
+
+def test_one_earned_source_is_not_held_back_by_a_shadowed_one_beside_it():
+    bundle = SignalBundle(
+        symbol="TST", run_date=RUN,
+        ticker_signals=[
+            sig(source="earned", direction=1, strength=1.0),
+            sig(source="untested", direction=1, strength=1.0),
+        ],
+        weights={"earned": 1.0},
+        caps={"earned": 3.0},
+    )
+    # The ceiling comes from the graduated source; the untested one contributes
+    # zero to the numerator but still dilutes, which is the conservative side.
+    assert bundle.max_adjustment == 3.0
+    assert bundle.score_adjustment() == pytest.approx(1.5)
 
 
 def test_readings_record_market_signals_too_so_the_macro_call_can_be_graded():
@@ -525,7 +599,7 @@ def test_abstentions_are_not_scored_either_way():
     report = A.score_entries([entry("AAA", RUN, {"quiet": 0})], fixed(6.0), RUN)
     score = report.scores["quiet"]
     assert (score.samples, score.hits, score.abstained) == (0, 0, 1)
-    assert score.accuracy is None and score.weight == 1.0
+    assert score.accuracy is None and score.weight == 0.0
 
 
 def test_moves_inside_the_dead_band_are_dropped_rather_than_graded_as_misses():
@@ -576,13 +650,14 @@ def test_entries_without_signal_readings_are_skipped():
     assert report.scores == {} and report.unresolved == 0
 
 
-def test_a_short_lucky_streak_barely_moves_the_weight():
-    """Three correct calls is 100% accuracy and means nothing."""
+def test_a_short_lucky_streak_earns_nothing_at_all():
+    """Three correct calls is 100% accuracy and means nothing — and it used to
+    be worth weight 1.09 and the full ±8 points."""
     lucky = A.SourceScore("src", samples=3, hits=3)
-    proven = A.SourceScore("src", samples=A.FULL_CONFIDENCE_SAMPLES, hits=A.FULL_CONFIDENCE_SAMPLES)
-    assert lucky.accuracy == proven.accuracy == 1.0
-    assert 1.0 < lucky.weight < 1.15
-    assert proven.weight == pytest.approx(A.MAX_WEIGHT)
+    graduated = A.SourceScore("src", samples=A.MIN_OBSERVATIONS, hits=A.MIN_OBSERVATIONS)
+    assert lucky.accuracy == graduated.accuracy == 1.0
+    assert lucky.weight == 0.0 and not lucky.graduated
+    assert graduated.weight == pytest.approx(A.MAX_WEIGHT)
 
 
 def test_a_proven_wrong_source_is_halved_but_never_silenced():
@@ -590,9 +665,59 @@ def test_a_proven_wrong_source_is_halved_but_never_silenced():
     assert hopeless.weight == pytest.approx(A.MIN_WEIGHT)
 
 
-def test_an_unscored_source_runs_at_neutral_weight():
-    assert A.SourceScore("src").weight == 1.0
+def test_an_unscored_source_is_shadowed_not_trusted():
+    """Inverted cold start: "never checked" is not "checked and average"."""
+    assert A.SourceScore("src").weight == 0.0
+    assert A.SourceScore("src").max_adjustment == 0.0
     assert A.AccuracyReport(scored_on=RUN, window_days=90).weights() == {}
+    assert A.AccuracyReport(scored_on=RUN, window_days=90).caps() == {}
+
+
+@pytest.mark.parametrize(
+    "samples,expected",
+    [(0, 0.0), (19, 0.0), (20, 1.0), (49, 1.0), (50, 3.0), (99, 3.0), (100, 5.0), (400, 5.0)],
+)
+def test_the_graduation_ladder_buys_influence_one_rung_at_a_time(samples, expected):
+    assert A.SourceScore("src", samples=samples, hits=samples).max_adjustment == expected
+
+
+def test_the_top_of_the_ladder_needs_a_human_to_unlock():
+    """±8 is the old, unearned default. It is now a deliberate act."""
+    top = A.SourceScore("src", samples=200, hits=180)
+    assert top.max_adjustment == 5.0
+    assert A.SourceScore("src", samples=200, hits=180, proven=True).max_adjustment == 8.0
+    # ...and marking a source proven does not skip the rungs below it.
+    assert A.SourceScore("src", samples=30, hits=28, proven=True).max_adjustment == 1.0
+
+
+def test_a_rescore_does_not_erase_the_human_proven_flag(tmp_path):
+    journal = tmp_path / "journal.jsonl"
+    journal.write_text(
+        "\n".join(
+            __import__("json").dumps(entry("AAA", RUN - timedelta(days=i), {"src": 1}))
+            for i in range(3)
+        )
+        + "\n"
+    )
+    tracker = A.AccuracyTracker(journal_path=journal)
+    tracker.save(
+        A.AccuracyReport(
+            scored_on=RUN - timedelta(days=30), window_days=90,
+            scores={"src": A.SourceScore("src", samples=200, hits=180, proven=True)},
+        )
+    )
+    fresh = tracker.current(RUN, realised=fixed(6.0))
+    assert fresh.scores["src"].proven is True
+
+
+def test_the_report_says_a_source_is_shadowed_rather_than_implying_it_counts():
+    report = A.AccuracyReport(
+        scored_on=RUN, window_days=90,
+        scores={"news_tone": A.SourceScore("news_tone", samples=4, hits=3)},
+    )
+    text = report.markdown()
+    assert "SHADOW (4/20 resolved)" in text
+    assert report.graduated == []
 
 
 def test_the_tracker_rescores_only_after_a_week(tmp_path):

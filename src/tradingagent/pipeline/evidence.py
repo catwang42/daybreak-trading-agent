@@ -27,11 +27,12 @@ from datetime import date, datetime, timezone
 
 import pandas as pd
 
-from ..data.finnhub_client import FinnhubFree, NewsItem
+from ..data.finnhub_client import FinnhubFree, NewsItem, news_window
 from ..data.fundamentals import Fundamentals, FundamentalsClient, Positioning
 from ..data.indicators import IndicatorSet, compute_indicators
 from ..data.market import MarketData
 from ..data.validate import DegradedTracker
+from ..snapshot import Observation, ResearchSnapshot
 from .context import DeepContext, QueuedTicker
 
 log = logging.getLogger(__name__)
@@ -39,6 +40,8 @@ log = logging.getLogger(__name__)
 # Enough history for a 200-day SMA plus a year of context for the percentile reads.
 DEEP_HISTORY = "2y"
 MIN_BARS = 60
+#: Headlines an analyst prompt gets when this stage has to fetch its own.
+NEWS_LIMIT = 8
 
 
 @dataclass
@@ -49,12 +52,27 @@ class Evidence:
     run_date: date
     market_context: str
     macro_note: str
+    #: The window's releases with the confidence class of each date. The note
+    #: above is what a model reads; this is what the pipeline enforces against.
+    macro_events: list = field(default_factory=list)
     indicators: IndicatorSet | None = None
     fundamentals: Fundamentals | None = None
     positioning: Positioning | None = None
     news: list[NewsItem] = field(default_factory=list)
+    #: The window those headlines were asked for, rendered for the prompt so an
+    #: analyst reads "2026-08-07..2026-08-14", not an unfalsifiable "recent".
+    news_window_note: str = ""
     missing: list[str] = field(default_factory=list)
     source_notes: list[tuple[str, str]] = field(default_factory=list)
+    #: Which research snapshot every price figure below belongs to, and the
+    #: session it describes. Empty only if the deep stage ran without one.
+    snapshot_id: str = ""
+    market_as_of: date | None = None
+    #: The last close, with its lineage — the same object discovery ranked on.
+    price_observation: Observation | None = None
+    #: Anything that had to be fetched outside the snapshot, named so a reader
+    #: can see which figures are not covered by the run's one picture.
+    off_snapshot: list[str] = field(default_factory=list)
 
     @property
     def symbol(self) -> str:
@@ -93,8 +111,8 @@ class Evidence:
             gaps.append("company fundamentals")
         if self.positioning is None:
             gaps.append("positioning data")
-        if not self.news:
-            gaps.append("company news")
+        if not any(n.attributable for n in self.news):
+            gaps.append("company news naming the company")
         return gaps
 
     # -- rendered slices, one per analyst --------------------------------
@@ -116,19 +134,43 @@ class Evidence:
         return "\n".join(parts)
 
     def news_block(self) -> str:
-        parts = ["### Company headlines (last 7 days)", ""]
-        if self.news:
-            for item in self.news:
-                stamp = _stamp(item.datetime_utc)
-                parts.append(f"- [{stamp}] {item.headline} ({item.source})")
+        window = self.news_window_note or "last 7 days"
+        about = [n for n in self.news if n.attributable]
+        loose = [n for n in self.news if not n.attributable]
+        parts = [f"### Company headlines ({window})", ""]
+        if about:
+            for item in about:
+                parts.append(f"- [{_stamp(item.datetime_utc)}] {item.headline} ({item.source})")
         else:
-            parts.append("- No headlines retrieved for this ticker in the window.")
+            parts.append("- No headlines naming this company were retrieved in the window.")
+        if loose:
+            # The feed tagged these to the symbol and the headline does not name
+            # the company. Shown, because a peer or sector story is worth
+            # reading; separated, because reports have attributed a SanDisk
+            # investor day to V and a Berkshire 13F to STZ.
+            parts += [
+                "",
+                f"#### Tagged to {self.symbol} by the news feed, but not about it on their face",
+                "",
+                f"These headlines do not name {self.symbol} or its issuer. They may be about "
+                "a peer, the sector, or an index. Treat them as background: do not describe "
+                f"them as {self.symbol} news and do not build a thesis on them.",
+                "",
+            ]
+            parts += [
+                f"- [{_stamp(item.datetime_utc)}] {item.headline} ({item.source})"
+                for item in loose
+            ]
         parts += [
             "",
             "### Scheduled events",
             "",
             f"- Earnings: {self.queued.earnings_note}",
             f"- Macro releases in the window:\n{_indent(self.macro_note)}",
+            "- Only a VERIFIED release date may be waited for or sized around. "
+            "An INDICATIVE date is a weekday-of-month approximation, STALE means "
+            "we know when it last printed and not when it next will, and MISSING "
+            "means no source answered.",
             "",
             self.signal_block(),
         ]
@@ -165,7 +207,9 @@ class Evidence:
         parts += [
             f"- Volume vs 20-day average: {self.queued.screener.get('volume_ratio_20d', 'unavailable')}",
             f"- Close location in the day's range: {self.queued.screener.get('close_location_pct', 'unavailable')}%",
-            f"- Headlines retrieved in the last 7 days: {len(self.news)}",
+            f"- Headlines naming the company in the last 7 days: "
+            f"{sum(1 for n in self.news if n.attributable)} "
+            f"(plus {sum(1 for n in self.news if not n.attributable)} feed-tagged, unattributed)",
             "",
             self.signal_block(),
             "",
@@ -201,9 +245,35 @@ class Evidence:
         lines.append(f"- Earnings: {self.queued.earnings_note}")
         return "\n".join(lines)
 
+    def provenance(self) -> str:
+        """One line naming the picture every price below was taken from.
+
+        Before M6 the deep stage downloaded its own bars, so a reader comparing
+        the brief with a deep report found two different closes for the same
+        ticker and no way to tell which was which. Naming the snapshot is what
+        makes that checkable rather than a matter of trust.
+        """
+        if not self.snapshot_id:
+            return (
+                "**Provenance unavailable** — this ticker was analysed without a research "
+                "snapshot, so its prices cannot be tied to the discovery run."
+            )
+        line = (
+            f"**Snapshot:** `{self.snapshot_id}` · market as of "
+            f"{self.market_as_of.isoformat() if self.market_as_of else 'unknown'} close"
+        )
+        if self.price_observation:
+            line += f" · last close {self.price_observation.cite()}"
+        if self.off_snapshot:
+            line += (
+                f"\n\n**Fetched outside the snapshot:** {', '.join(self.off_snapshot)} — "
+                "these are not covered by the closes above."
+            )
+        return line
+
     def sources(self) -> str:
         """Section 7 of the deep report: what was read, and when."""
-        rows = ["| Source | Coverage | As of |", "|---|---|---|"]
+        rows = [self.provenance(), "", "| Source | Coverage | As of |", "|---|---|---|"]
         rows += [f"| {name} | {what} | {when} |" for name, what, when in self._source_rows()]
         if self.missing:
             rows += ["", f"**Missing this run:** {', '.join(self.missing)}."]
@@ -212,9 +282,10 @@ class Evidence:
     def _source_rows(self) -> list[tuple[str, str, str]]:
         rows: list[tuple[str, str, str]] = []
         if self.indicators:
+            origin = "discovery snapshot" if self.snapshot_id else "re-downloaded by this stage"
             rows.append(
                 (
-                    "yfinance OHLCV",
+                    f"yfinance OHLCV ({origin})",
                     f"{self.indicators.sessions} daily bars, {len(self.indicators.indicators)} indicators",
                     dict(self.source_notes).get("bars", "—"),
                 )
@@ -226,16 +297,23 @@ class Evidence:
         rows.append(
             (
                 "Finnhub company news",
-                f"{len(self.news)} headline(s), 7-day window",
-                self.run_date.isoformat(),
+                f"{sum(1 for n in self.news if n.attributable)} of {len(self.news)} headline(s) "
+                "name the company; all published on or before the close",
+                dict(self.source_notes).get("news", self.news_window_note or "—"),
             )
         )
         rows.append(("Screener (this run)", "momentum-burst metrics", self.run_date.isoformat()))
+        shadowed = self.queued.signal_adjustment == 0.0
         for source in sorted(self.queued.signal_readings):
             rows.append(
                 (
-                    f"Signal: {source}",
-                    f"direction {self.queued.signal_readings[source]:+d} at decision time",
+                    f"Signal: {source}" + (" (SHADOW)" if shadowed else ""),
+                    f"direction {self.queued.signal_readings[source]:+d} at decision time"
+                    + (
+                        " — ungraded source, contributed 0 ranking points"
+                        if shadowed
+                        else ""
+                    ),
                     self.run_date.isoformat(),
                 )
             )
@@ -246,7 +324,16 @@ class Evidence:
 
 
 class EvidenceBuilder:
-    """Fetches and caches everything the deep stage needs for a set of tickers."""
+    """Assembles everything the deep stage needs for a set of tickers.
+
+    Bars come from the run's :class:`~tradingagent.snapshot.ResearchSnapshot`,
+    not from a fresh download. That is the M6 fix: this class used to construct
+    its own :class:`MarketData` and re-fetch the queue minutes after discovery
+    had screened it, which is how one run reported V at 365.45 in the brief and
+    364.15 in the deep report. A symbol the snapshot does not carry is still
+    fetched — a queue entry from ``--tickers`` was never in it — but it is
+    named in the report as off-snapshot rather than blended in silently.
+    """
 
     def __init__(
         self,
@@ -255,20 +342,44 @@ class EvidenceBuilder:
         degraded: DegradedTracker,
         market: MarketData | None = None,
         fundamentals: FundamentalsClient | None = None,
+        snapshot: ResearchSnapshot | None = None,
     ):
         self.context = context
         self.finnhub = finnhub
         self.degraded = degraded
         self.market = market or MarketData(degraded=degraded, period=DEEP_HISTORY)
         self.fundamentals = fundamentals or FundamentalsClient(degraded=degraded)
+        self.snapshot = snapshot
         self._bars: dict[str, pd.DataFrame] = {}
+        #: Symbols whose bars the snapshot could not supply.
+        self._refetched: set[str] = set()
 
     def prefetch(self, symbols: list[str]) -> None:
-        """One bulk OHLCV download for the whole queue."""
+        """Take the queue's bars from the snapshot; download only what it lacks."""
         if not symbols:
             return
-        self._bars = self.market.load_many(symbols, min_rows=MIN_BARS, period=DEEP_HISTORY)
-        log.info("Deep stage: usable price history for %d/%d queued tickers", len(self._bars), len(symbols))
+        wanted = [s.upper() for s in symbols]
+        if self.snapshot is not None:
+            self._bars = {
+                s: frame
+                for s in wanted
+                if (frame := self.snapshot.frame(s)) is not None and len(frame.index) >= MIN_BARS
+            }
+            log.info(
+                "Deep stage: %d/%d queued tickers served from snapshot %s",
+                len(self._bars),
+                len(wanted),
+                self.snapshot.snapshot_id,
+            )
+        gaps = [s for s in wanted if s not in self._bars]
+        if not gaps:
+            return
+        if self.snapshot is not None:
+            log.warning("Deep stage: not in the snapshot, downloading: %s", ", ".join(gaps))
+        fetched = self.market.load_many(gaps, min_rows=MIN_BARS, period=DEEP_HISTORY)
+        self._refetched.update(fetched)
+        self._bars.update(fetched)
+        log.info("Deep stage: usable price history for %d/%d queued tickers", len(self._bars), len(wanted))
 
     def build(self, queued: QueuedTicker) -> Evidence:
         symbol = queued.symbol
@@ -277,30 +388,85 @@ class EvidenceBuilder:
             run_date=self.context.date,
             market_context=self.context.market_context,
             macro_note=self.context.macro_note,
+            macro_events=self.context.macro_calendar(),
+            snapshot_id=self.snapshot.snapshot_id if self.snapshot else self.context.snapshot_id,
+            market_as_of=self.snapshot.market_as_of if self.snapshot else None,
         )
 
         frame = self._bars.get(symbol)
         if frame is None:
+            frame = self.snapshot.frame(symbol) if self.snapshot else None
+        if frame is None:
             single = self.market.load_many([symbol], min_rows=MIN_BARS, period=DEEP_HISTORY)
             frame = single.get(symbol)
+            if frame is not None:
+                self._refetched.add(symbol)
         if frame is None:
             evidence.missing.append("price history")
             self.degraded.add(f"Deep {symbol}", "no usable OHLCV history; ticker cannot be analysed")
             return evidence
 
         evidence.indicators = compute_indicators(symbol, frame)
-        evidence.source_notes.append(("bars", pd.Timestamp(frame.index[-1]).strftime("%Y-%m-%d close")))
+        bar_date = pd.Timestamp(frame.index[-1]).date()
+        evidence.source_notes.append(("bars", f"{bar_date.isoformat()} close"))
+
+        if self.snapshot is not None:
+            # A bar dated past the snapshot's market date is a look-ahead
+            # wherever it came from: from a fresh download it is tomorrow's
+            # data in today's report, and from the snapshot file it means
+            # something merged newer bars into a frozen picture.
+            self.snapshot.check(f"{symbol} bars", bar_date)
+            if symbol in self._refetched:
+                evidence.off_snapshot.append(f"{symbol} daily bars (not in the snapshot)")
+            else:
+                evidence.price_observation = self.snapshot.price(symbol)
 
         evidence.fundamentals = self.fundamentals.fundamentals(symbol)
         if evidence.fundamentals.missing:
             evidence.missing.append(f"fundamentals fields ({len(evidence.fundamentals.missing)})")
         evidence.positioning = self.fundamentals.positioning(symbol)
 
-        evidence.news = self.finnhub.company_news(symbol, days=7, limit=8)
+        evidence.news = self._news(symbol, evidence)
         if not evidence.news:
             evidence.missing.append("company news")
         evidence.missing.append("social/retail sentiment (not collected in this milestone)")
         return evidence
+
+    def _news(self, symbol: str, evidence: Evidence) -> list:
+        """Discovery's frozen headlines, or a window-bounded fetch if it has none.
+
+        The old call was ``company_news(symbol, days=7)``, which meant seven
+        days back from wall-clock now: a ``--date`` re-run read the right
+        prices against this week's headlines, and even a same-day run gave the
+        deep stage stories the shortlist had never seen. The window is the
+        snapshot's; anything filed after its close is dropped by the client.
+        """
+        frozen = self.snapshot.headlines(symbol) if self.snapshot else None
+        if frozen is not None:
+            window = self.snapshot.news_window
+            note = (
+                f"{window[0].isoformat()}..{window[1].isoformat()}, frozen at discovery"
+                if window
+                else "frozen at discovery"
+            )
+            evidence.news_window_note = note
+            evidence.source_notes.append(("news", note))
+            return list(frozen)
+
+        as_of = (
+            self.snapshot.market_as_of
+            if self.snapshot
+            else (evidence.market_as_of or self.context.date)
+        )
+        start, end = news_window(as_of)
+        items = self.finnhub.company_news(symbol, start, end, limit=NEWS_LIMIT)
+        evidence.news_window_note = f"{start.isoformat()}..{end.isoformat()}"
+        evidence.source_notes.append(("news", f"{start.isoformat()}..{end.isoformat()}"))
+        if self.snapshot is not None:
+            # Not in discovery's freeze — a --tickers run, or a name added
+            # after the shortlist. Fetched to the same window, but say so.
+            evidence.off_snapshot.append(f"{symbol} company news (fetched by this stage)")
+        return items
 
 
 def _lvl(value: float | None) -> str:

@@ -30,6 +30,7 @@ from ..config import Settings
 from ..data.finnhub_client import FinnhubFree
 from ..data.validate import DegradedTracker
 from ..llm import LLMGateway, TokenLedger
+from ..snapshot import ResearchSnapshot
 from .analysts import AnalystResult, run_analysts, stance_spread
 from .context import DeepContext, QueuedTicker
 from .debate import DebateResult, run_debate
@@ -37,6 +38,8 @@ from .evidence import Evidence, EvidenceBuilder
 from .portfolio_manager import run_portfolio_manager
 from .risk import RiskReview, run_risk_committee
 from .schemas import PortfolioDecision, TraderProposal
+from .macro_gate import suppressed_gates
+from .trade_plan import TradePlan, build_trade_plan, plan_texts, quoted_figure_corrections
 from .trader import run_trader
 
 log = logging.getLogger(__name__)
@@ -67,6 +70,9 @@ class DeepResult:
     risk: RiskReview | None = None
     decision: PortfolioDecision | None = None
     decision_error: str | None = None
+    #: The computed arithmetic. Built once from the trader's levels so the risk
+    #: committee critiques real numbers, then rebuilt against the final verdict.
+    trade_plan: TradePlan | None = None
     aborted: str | None = None
     seconds: float = 0.0
     cost_by_tier: dict[str, TierCost] = field(default_factory=dict)
@@ -148,6 +154,7 @@ def analyze_ticker(
     evidence: Evidence,
     degraded: DegradedTracker,
     rounds: int = 1,
+    snapshot: ResearchSnapshot | None = None,
 ) -> DeepResult:
     """Run the full role sequence for one ticker. Never raises."""
     started = time.monotonic()
@@ -180,6 +187,13 @@ def analyze_ticker(
         gateway, evidence, result.analysts, result.debate.plan, degraded, result.debate.plan_error
     )
 
+    result.trade_plan = build_trade_plan(
+        evidence,
+        result.proposal,
+        result.debate.plan.recommendation if result.debate.plan else None,
+        snapshot=snapshot,
+    )
+
     log.info("Deep %s: risk committee (smart tier)", evidence.symbol)
     result.risk = run_risk_committee(
         gateway,
@@ -191,6 +205,7 @@ def analyze_ticker(
         rounds=1,  # one pass of three seats; the PM arbitrates rather than re-running them
         plan_error=result.debate.plan_error,
         proposal_error=result.proposal_error,
+        trade_plan=result.trade_plan,
     )
 
     log.info("Deep %s: portfolio manager verdict (deep tier)", evidence.symbol)
@@ -203,7 +218,34 @@ def analyze_ticker(
         result.risk,
         degraded,
         proposal_error=result.proposal_error,
+        trade_plan=result.trade_plan,
     )
+    # Rebuilt against the verdict that will actually be published: the manager
+    # can overrule the research manager's rating and states the price target,
+    # and both change the arithmetic.
+    if result.decision is not None:
+        result.trade_plan = build_trade_plan(
+            evidence,
+            result.proposal,
+            result.decision.rating,
+            result.decision.price_target,
+            snapshot=snapshot,
+        )
+        texts = plan_texts(result.proposal, result.decision)
+        result.trade_plan.corrections = quoted_figure_corrections(result.trade_plan, texts)
+        # A wait that rests on an approximate release date is struck out here,
+        # not argued with: the models never see which dates are schedules.
+        result.trade_plan.suppressed_gates = suppressed_gates(texts, evidence.macro_events)
+        if result.trade_plan.suppressed_gates:
+            log.warning(
+                "Deep %s: %d macro gate(s) suppressed — unverified release date",
+                evidence.symbol, len(result.trade_plan.suppressed_gates),
+            )
+        if result.trade_plan.corrections:
+            log.warning(
+                "Deep %s: %d quoted figure(s) disagree with the computed plan",
+                evidence.symbol, len(result.trade_plan.corrections),
+            )
     log.info(
         "Deep %s: verdict %s in %.1fs", evidence.symbol, result.verdict, time.monotonic() - started
     )
@@ -217,6 +259,7 @@ def run_queue(
     finnhub: FinnhubFree,
     degraded: DegradedTracker,
     only: list[str] | None = None,
+    snapshot: ResearchSnapshot | None = None,
 ) -> list[DeepResult]:
     """Analyse the queued tickers, honouring ``DEEP_TICKER_CAP``."""
     queue = context.limit(settings.deep_ticker_cap, only=only)
@@ -231,11 +274,15 @@ def run_queue(
         settings.deep_ticker_cap,
         settings.debate_rounds,
     )
-    builder = EvidenceBuilder(context, finnhub, degraded)
+    builder = EvidenceBuilder(context, finnhub, degraded, snapshot=snapshot)
     builder.prefetch([q.symbol for q in queue])
 
     results: list[DeepResult] = []
     for queued in queue:
         evidence = builder.build(queued)
-        results.append(analyze_ticker(gateway, evidence, degraded, rounds=settings.debate_rounds))
+        results.append(
+            analyze_ticker(
+                gateway, evidence, degraded, rounds=settings.debate_rounds, snapshot=snapshot
+            )
+        )
     return results

@@ -37,6 +37,16 @@ from datetime import date
 
 from ..data.option_chain import ChainSlice, OptionQuote
 from .black_scholes import DAYS_PER_YEAR, bs_delta, bs_theta, implied_volatility
+from .levels import (
+    ACQUIRE_AFTER_FAILURE,
+    INVALIDATION,
+    TARGET,
+    PriceLevel,
+    assignment_conflict,
+    chart_levels,
+    of_role,
+    upside_conflict,
+)
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +72,14 @@ class StrategyRules:
     delta_high: float = 0.30
     delta_tolerance: float = 0.05
     min_open_interest: int = 20
+    #: A measurable spread wider than this is a rejection, not a penalty: half
+    #: of it is paid entering and half exiting, which is most of the credit on
+    #: a 0.25-delta contract. A book with no measurable spread — one-sided, or
+    #: no two-way market at all — is *not* rejected on that ground: the free
+    #: indicative feed returns whole chains one-sided outside market hours, so
+    #: rejecting them would silently empty the screen on every evening run.
+    #: Those are scored down and printed as priced off the bid / last / prior
+    #: close instead, so the human sees the unverifiable exit cost.
     max_spread_pct: float = 20.0
     min_credit: float = 0.10
     max_candidates: int = 3
@@ -107,6 +125,11 @@ class OptionCandidate:
     if_called_return_pct: float | None = None
     score: float = 0.0
     notes: list[str] = field(default_factory=list)
+    #: Set when the strike is only defensible as an acquire-after-setup-failure
+    #: trade — assignment lands at or above the equity invalidation.
+    acquire_after_failure: bool = False
+    #: Ways this strike disagrees with the equity plan. Printed, never hidden.
+    conflicts: list[str] = field(default_factory=list)
 
     @property
     def symbol(self) -> str:
@@ -169,6 +192,8 @@ class OptionCandidate:
             "earnings_checked": self.earnings_checked,
             "score": round(self.score, 2),
             "score_notes": list(self.notes),
+            "acquire_after_failure": self.acquire_after_failure,
+            "plan_conflicts": list(self.conflicts),
             "greeks_source": "computed (Black-Scholes) — the free feed supplies none",
             "volume_available": False,
         }
@@ -207,23 +232,25 @@ def skip_reason(rating: str) -> str:
 # --------------------------------------------------------------------------
 # level anchoring
 # --------------------------------------------------------------------------
-def support_anchor(levels: dict[str, float | None], spot: float) -> LevelAnchor:
-    """Nearest level *below* spot — where a put strike wants to sit.
+def support_anchor(levels: list[PriceLevel], spot: float) -> LevelAnchor:
+    """Nearest chart level *below* spot — where a put strike wants to sit.
 
     Nearest rather than lowest: the first level under the market is the one
     price has to break for assignment to be live, so it is the one the strike
-    is really being placed against.
+    is really being placed against. Only SUPPORT and RESISTANCE levels are
+    eligible: the plan's invalidation is a line to stay below, not a shelf to
+    sit on (see :mod:`.levels`).
     """
-    below = {k: v for k, v in levels.items() if v is not None and 0 < v < spot}
+    below = {k: v for k, v in chart_levels(levels).items() if 0 < v < spot}
     if not below:
         return LevelAnchor(None, "no support level below spot")
     label = max(below, key=lambda k: below[k])
     return LevelAnchor(below[label], label)
 
 
-def resistance_anchor(levels: dict[str, float | None], spot: float) -> LevelAnchor:
-    """Nearest level *above* spot — the floor for a covered-call strike."""
-    above = {k: v for k, v in levels.items() if v is not None and v > spot}
+def resistance_anchor(levels: list[PriceLevel], spot: float) -> LevelAnchor:
+    """Nearest chart level *above* spot — the floor for a covered-call strike."""
+    above = {k: v for k, v in chart_levels(levels).items() if v > spot}
     if not above:
         return LevelAnchor(None, "no resistance level above spot")
     label = min(above, key=lambda k: above[k])
@@ -384,18 +411,20 @@ def score_candidate(candidate: OptionCandidate, rules: StrategyRules) -> OptionC
     spread = candidate.quote.spread_pct
     if spread is None:
         score -= 1.0
-        notes.append(f"one-sided book, priced off the {candidate.quote.price_basis} (−1.0)")
+        notes.append(
+            f"one-sided book — exit cost unverifiable, priced off the "
+            f"{candidate.quote.price_basis} (−1.0)"
+        )
     elif spread < 5:
         score += 1.0
         notes.append(f"spread {spread:.1f}% (+1.0)")
     elif spread < 10:
         score += 0.5
         notes.append(f"spread {spread:.1f}% (+0.5)")
-    elif spread < rules.max_spread_pct:
-        notes.append(f"spread {spread:.1f}% — wide (0.0)")
     else:
-        score -= 1.0
-        notes.append(f"spread {spread:.1f}% — too wide to price (−1.0)")
+        # Above ``max_spread_pct`` the candidate has already been rejected by
+        # hard_filters; this branch is what a relaxed screen would score.
+        notes.append(f"spread {spread:.1f}% — wide (0.0)")
 
     # 4. IV level: too low is not worth the obligation, too high is a warning.
     if candidate.iv is not None:
@@ -470,6 +499,44 @@ def score_candidate(candidate: OptionCandidate, rules: StrategyRules) -> OptionC
 
 
 # --------------------------------------------------------------------------
+# agreement with the equity plan
+# --------------------------------------------------------------------------
+def check_against_plan(
+    candidate: OptionCandidate,
+    levels: list[PriceLevel],
+    *,
+    allow_acquire_after_failure: bool = False,
+) -> str | None:
+    """Does this strike contradict the equity plan? Returns a rejection reason.
+
+    Two rules, both from shipped defects (see :mod:`.levels`):
+
+    - A put whose assignment breakeven sits at or below the equity invalidation
+      is not the trade it is being sold as: it can only be assigned after the
+      plan has stopped out. It is rejected unless the caller has said it wants
+      an acquire-after-setup-failure trade, in which case it is kept and
+      labelled — never presented as an entry.
+    - A call struck below the base-case target sells the upside the thesis is
+      built on. That is a warning, not a rejection: an income overlay on a Hold
+      is allowed to cap a target it does not believe in, as long as the report
+      says out loud what it is capping.
+    """
+    if candidate.strategy == CSP:
+        conflict = assignment_conflict(candidate.breakeven, of_role(levels, INVALIDATION))
+        if conflict:
+            if not allow_acquire_after_failure:
+                return "assignment breakeven at or below the equity invalidation"
+            candidate.acquire_after_failure = True
+            candidate.conflicts.append(f"{ACQUIRE_AFTER_FAILURE}: {conflict}")
+        return None
+
+    conflict = upside_conflict(candidate.strike, of_role(levels, TARGET))
+    if conflict:
+        candidate.conflicts.append(conflict)
+    return None
+
+
+# --------------------------------------------------------------------------
 # the screen
 # --------------------------------------------------------------------------
 def hard_filters(candidate: OptionCandidate, rules: StrategyRules) -> str | None:
@@ -494,6 +561,11 @@ def hard_filters(candidate: OptionCandidate, rules: StrategyRules) -> str | None
         return "delta too low — not worth the obligation"
     if q.open_interest is not None and q.open_interest < rules.min_open_interest:
         return f"open interest under {rules.min_open_interest}"
+    if q.spread_pct is not None and q.spread_pct > rules.max_spread_pct:
+        # A spread this wide is not a price, it is a range. Half of it is paid
+        # on the way in and half on the way out, which on a 0.25-delta put is
+        # most of the credit the trade exists to collect.
+        return f"spread wider than {rules.max_spread_pct:.0f}%"
     return None
 
 
@@ -502,13 +574,14 @@ def build_candidates(
     *,
     strategy: str,
     spot: float,
-    levels: dict[str, float | None],
+    levels: list[PriceLevel],
     risk_free_rate: float,
     as_of: date,
     dividend_yield: float = 0.0,
     earnings_dates: list[date] | None = None,
     earnings_checked: bool = True,
     rules: StrategyRules | None = None,
+    allow_acquire_after_failure: bool = False,
 ) -> tuple[list[OptionCandidate], list[str]]:
     """Score one chain slice and return the best strikes, plus what was rejected.
 
@@ -541,7 +614,9 @@ def build_candidates(
         if candidate is None:
             rejected["no usable quote"] = rejected.get("no usable quote", 0) + 1
             continue
-        reason = hard_filters(candidate, rules)
+        reason = hard_filters(candidate, rules) or check_against_plan(
+            candidate, levels, allow_acquire_after_failure=allow_acquire_after_failure
+        )
         if reason:
             rejected[reason] = rejected.get(reason, 0) + 1
             log.debug(
@@ -550,6 +625,11 @@ def build_candidates(
             )
             continue
         scored.append(score_candidate(candidate, rules))
+        if candidate.conflicts:
+            # A conflict is not a rejection, but it must not be outranked into
+            # invisibility either: it is stated in the notes and it costs score.
+            candidate.notes += [f"{note} (−1.5)" for note in candidate.conflicts]
+            candidate.score -= 1.5 * len(candidate.conflicts)
 
     scored.sort(key=lambda c: (-c.score, abs(abs(c.delta or 1.0) - 0.25)))
     tally = [f"{count} × {reason}" for reason, count in sorted(rejected.items(), key=lambda kv: -kv[1])]

@@ -14,11 +14,13 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ..data.finnhub_client import FinnhubFree
+from ..data.finnhub_client import FinnhubFree, news_window
 from ..data.validate import DegradedTracker
 from ..llm import LLMError, LLMGateway
 from ..pipeline.prompts_loader import render
 from ..signals import SignalBundle, SignalHub
+from ..snapshot import ResearchSnapshot
+from ..signals.bundle import ShadowRanking
 from .breadth import BreadthResult
 from .calendar import CalendarView, earnings_within
 from .screener import Candidate
@@ -28,6 +30,13 @@ log = logging.getLogger(__name__)
 
 Rating = Literal["Buy", "Overweight", "Hold", "Underweight", "Sell"]
 RATING_ORDER: dict[str, int] = {"Buy": 5, "Overweight": 4, "Hold": 3, "Underweight": 2, "Sell": 1}
+
+#: Headlines pulled per shortlisted name. Sized for the deep stage, which is
+#: the hungriest reader, so one fetch serves both stages.
+NEWS_FREEZE_LIMIT = 8
+#: How many of those the quick-take prompt sees. A FAST-tier take on a
+#: screener candidate does not improve with a longer clipping file.
+QUICK_TAKE_HEADLINES = 3
 
 
 class QuickTake(BaseModel):
@@ -70,7 +79,17 @@ class ShortlistEntry:
 
     @property
     def score_adjustment(self) -> float:
+        """What the signal layer was actually allowed to contribute."""
         return self.signals.score_adjustment() if self.signals else 0.0
+
+    @property
+    def shadow_adjustment(self) -> float:
+        """What it would have contributed at full trust. Reported, not applied."""
+        return self.signals.shadow_adjustment() if self.signals else 0.0
+
+    @property
+    def is_shadow(self) -> bool:
+        return bool(self.signals and self.signals.is_shadow)
 
     @property
     def adjusted_score(self) -> float:
@@ -228,7 +247,7 @@ def quick_take_prompt(
         breadth_zone=breadth.zone,
         breadth_guidance=breadth.guidance,
         risk_regime=sector_map.risk_regime,
-        cycle_phase=sector_map.cycle_phase,
+        sector_rotation=sector_map.rotation_reading().describe(),
         sector_note=_sector_note(sector_map, candidate.sector),
         earnings_note=earnings_note,
         news_note=news_note,
@@ -250,12 +269,19 @@ def select_with_signals(
 ) -> list[tuple[Candidate, SignalBundle | None, int]]:
     """Choose the ``size`` names worth spending quick-take tokens on.
 
-    Returns ``(candidate, bundle, screen_rank)`` in signal-adjusted order.
-    ``screen_rank`` is the name's 1-based place on screener score alone, so a
-    later reader can see which names the signals moved and by how much.
+    Returns ``(candidate, bundle, screen_rank)``. ``screen_rank`` is the name's
+    1-based place on screener score alone.
 
-    With no hub this is the old behaviour — the top ``size`` by screener score,
-    untouched.
+    Membership is decided by ``candidate.score + bundle.score_adjustment()``,
+    and that adjustment is zero for every source that has not resolved enough
+    journal outcomes to graduate (:mod:`tradingagent.signals.accuracy`). With
+    today's record that is all of them, so this is the screener's own top
+    ``size`` — by arithmetic rather than by special case, so the mechanism
+    resumes on its own the day a source earns its weight.
+
+    The signals still run over the wider pool: the counterfactual ordering is
+    recorded on ``hub.shadow`` for the report, because a layer that is never
+    measured can never be graduated.
     """
     screen_rank = {c.symbol: i + 1 for i, c in enumerate(candidates)}
     if hub is None:
@@ -265,14 +291,24 @@ def select_with_signals(
     hub.collect([c.symbol for c in pool], run_date)
     scored = [(c, hub.bundle(c.symbol, run_date)) for c in pool]
     # Stable within a tie so the screener's own ordering still decides when the
-    # signal layer has nothing to say.
+    # signal layer has nothing to say — which, while every source is shadowed,
+    # is always.
     scored.sort(key=lambda pair: pair[0].score + pair[1].score_adjustment(), reverse=True)
     chosen = [(c, b, screen_rank[c.symbol]) for c, b in scored[:size]]
+
+    shadow = sorted(scored, key=lambda pair: pair[0].score + pair[1].shadow_adjustment(), reverse=True)
+    hub.shadow = ShadowRanking(
+        size=size,
+        chosen=[c.symbol for c, _, _ in chosen],
+        shadow=[c.symbol for c, _ in shadow[:size]],
+        adjustments={c.symbol: round(b.shadow_adjustment(), 2) for c, b in scored},
+    )
     promoted = [c.symbol for c, _, rank in chosen if rank > size]
     if promoted:
         log.info(
             "Signal layer promoted %s into the shortlist over screener order", ", ".join(promoted)
         )
+    log.info("Signal layer %s", hub.shadow.note())
     return chosen
 
 
@@ -287,14 +323,35 @@ def build_shortlist(
     degraded: DegradedTracker,
     size: int = 8,
     hub: SignalHub | None = None,
+    snapshot: ResearchSnapshot | None = None,
 ) -> list[ShortlistEntry]:
-    """Take the top ``size`` candidates and enrich each with a FAST quick take."""
+    """Take the top ``size`` candidates and enrich each with a FAST quick take.
+
+    News is fetched once here, for the snapshot's window, and frozen into the
+    snapshot. The deep stage then reads those same headlines instead of calling
+    Finnhub again hours later: two stages arguing about which stories exist is
+    the same defect as two stages arguing about which close is today's.
+    """
     entries: list[ShortlistEntry] = []
+    as_of = snapshot.market_as_of if snapshot else run_date
+    window = news_window(as_of)
     for candidate, bundle, screen_rank in select_with_signals(candidates, hub, run_date, size):
         earnings_note, earnings_flag = _earnings_note(calendar_view, candidate.symbol, run_date)
-        news = finnhub.company_news(candidate.symbol, days=7, limit=3)
+        news = finnhub.company_news(candidate.symbol, *window, limit=NEWS_FREEZE_LIMIT)
+        if snapshot is not None:
+            news = snapshot.freeze_news(candidate.symbol, news, window)
+        # Only headlines that name the company. The rest are feed-tagged
+        # syndication and have already been read as this name's news once too
+        # often (see :mod:`tradingagent.data.entity`).
+        about = [n for n in news if n.attributable]
         news_note = (
-            " | ".join(f"{n.headline} ({n.source})" for n in news) if news else "none retrieved"
+            " | ".join(f"{n.headline} ({n.source})" for n in about[:QUICK_TAKE_HEADLINES])
+            if about
+            else (
+                f"none naming the company ({len(news)} feed-tagged headline(s) excluded)"
+                if news
+                else "none retrieved"
+            )
         )
         prompt = quick_take_prompt(
             candidate,
@@ -320,7 +377,7 @@ def build_shortlist(
                 candidate=candidate,
                 take=take,
                 earnings_flag=earnings_flag,
-                news_headline=news[0].headline if news else None,
+                news_headline=next((n.headline for n in news if n.attributable), None),
                 degraded_reason=reason,
                 signals=bundle,
                 screen_rank=screen_rank,

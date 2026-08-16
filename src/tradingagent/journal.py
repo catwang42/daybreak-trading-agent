@@ -57,6 +57,10 @@ class JournalEntry:
     #: the source-accuracy tracker possible: a direction recorded before the
     #: outcome is known is the only honest way to grade a source later.
     signal_readings: dict[str, int] = field(default_factory=dict)
+    #: The computed trade arithmetic (M6): entry, stop, risk %, R multiple and
+    #: the size cap, so a later review grades the plan that was published
+    #: rather than re-deriving it from prose.
+    trade_plan: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = {key: getattr(self, key) for key in FIELD_ORDER}
@@ -67,6 +71,8 @@ class JournalEntry:
             payload["deep_dive_priority"] = self.deep_dive_priority
         if self.signal_readings:
             payload["signal_readings"] = self.signal_readings
+        if self.trade_plan is not None:
+            payload["trade_plan"] = self.trade_plan
         return payload
 
 
@@ -146,6 +152,11 @@ def entries_from_deep(results, run_date: date, report_dir: str = ""):
                 screener_score=result.queued.screener.get("score"),
                 deep_dive_priority=result.queued.priority or None,
                 signal_readings=dict(result.queued.signal_readings),
+                trade_plan=(
+                    result.trade_plan.journal_payload()
+                    if getattr(result, "trade_plan", None) is not None
+                    else None
+                ),
             )
         )
     return out

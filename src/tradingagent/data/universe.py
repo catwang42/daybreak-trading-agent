@@ -128,14 +128,39 @@ def fetch_live() -> list[Constituent]:
     return _parse(rows)
 
 
+def snapshot_version() -> str:
+    """What the bundled constituent file says it is, e.g. ``sp500.json@2026-08-14``.
+
+    A shortlist is only reproducible against the universe it was drawn from: a
+    name that entered last week may simply have been added to the index since.
+    """
+    try:
+        payload = json.loads(SNAPSHOT.read_text())
+    except (OSError, ValueError):
+        return f"{SNAPSHOT.name}@unknown"
+    return f"{SNAPSHOT.name}@{payload.get('as_of', 'unknown')}"
+
+
 def load_universe(refresh: bool = False) -> list[Constituent]:
     """Universe for the daily scan; falls back to the bundled snapshot."""
+    return load_universe_versioned(refresh=refresh)[0]
+
+
+def load_universe_versioned(refresh: bool = False) -> tuple[list[Constituent], str]:
+    """The universe, plus a label saying which version of it this is.
+
+    The label goes into the run's research snapshot. A refresh that fails falls
+    back to the bundled file and says so, because "live" and "live, except it
+    wasn't" produce different shortlists and only one of them is reproducible.
+    """
     if refresh:
         try:
-            return fetch_live()
+            live = fetch_live()
         except Exception as exc:  # noqa: BLE001 - the snapshot is a fine answer
             log.warning("Universe refresh failed (%s); using bundled snapshot.", exc)
-    return load_snapshot()
+            return load_snapshot(), f"{snapshot_version()} (live refresh failed: {exc})"
+        return live, "wikipedia live scrape"
+    return load_snapshot(), snapshot_version()
 
 
 def by_sector(constituents: list[Constituent]) -> dict[str, list[Constituent]]:

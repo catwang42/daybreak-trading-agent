@@ -422,3 +422,89 @@ def test_confirmation_checklist_is_countable_and_reaches_both_ends():
     lines, held = confirmation_checklist(weak, earnings_flag="2026-08-20 AMC")
     assert held == 0
     assert all(line.startswith("- [ ]") for line in lines)
+
+
+# --- shortlist selection while the signal layer is shadowed (M6 item 1) ---
+
+
+class _OneSignalSource:
+    """A source that shouts +1 at whichever symbol it is told to like."""
+
+    name = "loud"
+    scope = "ticker"
+    describes = "test double"
+
+    def __init__(self, likes: str):
+        self.likes = likes
+
+    def available(self):
+        return True, ""
+
+    def fetch(self, symbols, run_date):
+        from tradingagent.signals.base import Signal, SourceResult
+
+        return SourceResult(
+            source=self.name,
+            signals=[
+                Signal(source=self.name, kind="k", direction=1, strength=1.0,
+                       headline="h", as_of=run_date, symbol=self.likes)
+            ],
+        )
+
+
+def _hub(likes, weights=None, caps=None):
+    from tradingagent.signals.bundle import SignalHub
+
+    return SignalHub(sources=[_OneSignalSource(likes)], weights=weights, caps=caps)
+
+
+def test_an_ungraded_signal_cannot_promote_a_name_into_the_shortlist():
+    """The M6 hotfix, at the level that mattered: four of ten shortlist names
+    had entered this way, on sources with no resolved record at all."""
+    from tradingagent.discovery.shortlist import select_with_signals
+
+    pool = [_pool_candidate(s, score) for s, score in
+            [("AAA", 90), ("BBB", 80), ("CCC", 70), ("DDD", 60)]]
+    hub = _hub(likes="DDD")  # no weights, no caps: shadowed
+    chosen = select_with_signals(pool, hub, date(2026, 8, 14), size=2)
+
+    assert [c.symbol for c, _, _ in chosen] == ["AAA", "BBB"]
+    assert all(b.score_adjustment() == 0.0 for _, b, _ in chosen)
+
+
+def test_the_promotion_it_would_have_made_is_recorded_not_discarded():
+    from tradingagent.discovery.shortlist import select_with_signals
+
+    pool = [_pool_candidate(s, score) for s, score in
+            [("AAA", 90), ("BBB", 80), ("CCC", 79), ("DDD", 78)]]
+    hub = _hub(likes="DDD")
+    select_with_signals(pool, hub, date(2026, 8, 14), size=2)
+
+    shadow = hub.shadow
+    assert shadow is not None
+    assert shadow.chosen == ["AAA", "BBB"]
+    assert shadow.would_promote == ["DDD"] and shadow.would_drop == ["BBB"]
+    assert "SHADOW — would have changed: in DDD / out BBB." == shadow.note()
+    assert shadow.adjustments["DDD"] == 8.0
+
+
+def test_a_graduated_source_takes_its_influence_back():
+    """The shadow is a cold start, not a permanent muzzle: the same code path
+    resumes the moment the accuracy tracker says the source has earned it."""
+    from tradingagent.discovery.shortlist import select_with_signals
+
+    pool = [_pool_candidate(s, score) for s, score in
+            [("AAA", 90), ("BBB", 80), ("CCC", 79), ("DDD", 78)]]
+    hub = _hub(likes="DDD", weights={"loud": 1.0}, caps={"loud": 5.0})
+    chosen = select_with_signals(pool, hub, date(2026, 8, 14), size=2)
+
+    assert [c.symbol for c, _, _ in chosen] == ["AAA", "DDD"]
+    assert hub.shadow.would_reorder is False
+
+
+def test_no_signal_hub_at_all_is_still_plain_screener_order():
+    from tradingagent.discovery.shortlist import select_with_signals
+
+    pool = [_pool_candidate(s, score) for s, score in [("AAA", 90), ("BBB", 80)]]
+    chosen = select_with_signals(pool, None, date(2026, 8, 14), size=1)
+    assert [(c.symbol, b, rank) for c, b, rank in chosen] == [("AAA", None, 1)]

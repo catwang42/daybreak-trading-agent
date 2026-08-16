@@ -150,7 +150,16 @@ class ResearchPlan(BaseModel):
 
 
 class TraderProposal(BaseModel):
-    """The trader's transaction proposal (SMART tier)."""
+    """The trader's transaction *intent* (SMART tier).
+
+    Deliberately free of derived numbers. Entry, stop distance, risk per share,
+    risk percent, R multiple and size are computed in
+    :mod:`tradingagent.pipeline.trade_plan` from the run's snapshot — a model
+    that quotes its own arithmetic produced "2.5% risk" on a plan that risked
+    3.6%, because it was still holding an entry reference the plan had moved
+    off. What is asked for here is what a chart can be checked against: a level
+    and the reason it matters.
+    """
 
     action: Literal["Buy", "Hold", "Sell"] = Field(
         description="Exactly one of Buy / Hold / Sell. Sizing nuance is the portfolio manager's job."
@@ -159,16 +168,52 @@ class TraderProposal(BaseModel):
         max_length=1100,
         description=(
             "Why this action, anchored in the plan and the analysts. 2-4 "
-            "sentences, at most 1100 characters."
+            "sentences, at most 1100 characters. Do NOT compute risk "
+            "percentages, position sizes or reward:risk ratios — the pipeline "
+            "computes those from your levels and prints them next to this."
         ),
     )
-    entry_price: float | None = Field(default=None, description="Entry reference price, or null.")
-    stop_loss: float | None = Field(default=None, description="Stop-loss price, or null.")
-    position_sizing: str | None = Field(
-        default=None, description="Sizing guidance, e.g. '3% of portfolio, half now'."
+    entry_condition: str = Field(
+        default="",
+        max_length=400,
+        description=(
+            "What must be true before this is entered, in one sentence — e.g. "
+            "'only on a close back above the 50-day' or 'immediately, in two "
+            "tranches'. No prices needed here; the level goes in entry_level. "
+            "Max 400 characters."
+        ),
+    )
+    entry_type: Literal["market", "pullback", "breakout"] = Field(
+        default="market",
+        description=(
+            "'market' to work the current price, 'pullback' to wait for a lower "
+            "level (higher, if short), 'breakout' to wait for a higher one."
+        ),
+    )
+    entry_level: float | None = Field(
+        default=None,
+        description=(
+            "The price the pullback or breakout waits for, copied from a level "
+            "in the evidence. Null when entry_type is 'market'."
+        ),
+    )
+    invalidation_type: Literal["level", "moving_average", "atr", "percent"] = Field(
+        default="level",
+        description=(
+            "What kind of thing the stop is: a structural level, a moving "
+            "average, an ATR band, or a flat percentage."
+        ),
+    )
+    invalidation_level: float | None = Field(
+        default=None,
+        description=(
+            "The price at which this trade is wrong, taken from the evidence "
+            "(a swing low, a moving average, a band). Null if the evidence "
+            "supports no level — a 2-ATR stop is then computed for you."
+        ),
     )
 
-    @field_validator("entry_price", "stop_loss", mode="before")
+    @field_validator("entry_level", "invalidation_level", mode="before")
     @classmethod
     def _coerce(cls, v: object) -> object:
         return _nullish_to_none(v)

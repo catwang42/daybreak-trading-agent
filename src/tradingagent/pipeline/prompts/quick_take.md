@@ -27,7 +27,7 @@ Last close: ${price:.2f} ({day_gain_pct:+.2f}% on the day)
 
 ## Context
 - Market breadth composite: {breadth_composite}/100 ({breadth_zone}) — {breadth_guidance}
-- Sector regime: {risk_regime}, estimated cycle phase {cycle_phase}
+- Sector regime: {risk_regime}; {sector_rotation}
 - This sector's standing: {sector_note}
 - Earnings: {earnings_note}
 - Recent headlines: {news_note}

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, timedelta, timezone
+from typing import Sequence
 
 from ..config import Settings
 from ..data.finnhub_client import FinnhubFree
@@ -45,13 +46,22 @@ def _dividend_q(row: VerdictRow) -> float:
     return raw / 100.0
 
 
-def _chain_notes(chain: ChainSlice | None, feed_note: str, run_date: date) -> list[str]:
+def _chain_notes(
+    chain: ChainSlice | None,
+    feed_note: str,
+    run_date: date,
+    provenance: Sequence[str] = (),
+) -> list[str]:
     """What a reader needs to know before trusting the premiums.
 
     Written from the data, not from assumptions about the clock: the freshest
     quote in the slice is the honest statement of how live these prices are.
+
+    ``provenance`` names the two moments this section mixes on purpose: the
+    equity snapshot the strikes are anchored to, and the live quote snapshot
+    they are priced against.
     """
-    notes = [feed_note]
+    notes = [*provenance, feed_note]
     if chain is None:
         return notes
     stamps = [q.quote_at for q in chain.quotes if q.quote_at is not None]
@@ -91,6 +101,7 @@ def build_plan(
     finnhub: FinnhubFree,
     run_date: date,
     rules: StrategyRules | None = None,
+    provenance: Sequence[str] = (),
 ) -> OptionsPlan:
     """Screen one ticker. No LLM call happens here."""
     rules = rules or StrategyRules()
@@ -108,7 +119,7 @@ def build_plan(
     chain = chains.chain(
         row.symbol, right, min_dte=rules.min_dte, max_dte=rules.max_dte, run_date=run_date
     )
-    notes = _chain_notes(chain, chains.feed_note, run_date)
+    notes = _chain_notes(chain, chains.feed_note, run_date, provenance)
     if chain is None:
         return OptionsPlan(
             symbol=row.symbol,
@@ -130,7 +141,7 @@ def build_plan(
         chain,
         strategy=strategy,
         spot=row.spot,
-        levels=row.levels,
+        levels=row.price_levels(),
         risk_free_rate=settings.risk_free_rate,
         as_of=run_date,
         dividend_yield=_dividend_q(row),
@@ -157,10 +168,12 @@ def run_ticker(
     degraded: DegradedTracker,
     run_date: date,
     rules: StrategyRules | None = None,
+    provenance: Sequence[str] = (),
 ) -> OptionsPlan:
     """Screen, then ask the strategist — but only if there is a choice to make."""
     plan = build_plan(
-        row, settings=settings, chains=chains, finnhub=finnhub, run_date=run_date, rules=rules
+        row, settings=settings, chains=chains, finnhub=finnhub, run_date=run_date, rules=rules,
+        provenance=provenance,
     )
     if not plan.candidates:
         log.info(
@@ -202,6 +215,7 @@ def run_plans(
     *,
     only: list[str] | None = None,
     rules: StrategyRules | None = None,
+    provenance: Sequence[str] = (),
 ) -> tuple[list[OptionsPlan], AlpacaOptionChain]:
     """Every queued verdict, in order. Returns the plans and the chain reader.
 
@@ -231,6 +245,7 @@ def run_plans(
             degraded=degraded,
             run_date=context.date,
             rules=rules,
+            provenance=provenance,
         )
         for row in rows
     ], chains

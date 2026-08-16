@@ -23,11 +23,15 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 CONTEXT_FILENAME = "discovery-context.json"
-# v2 (M3) adds the signal layer. Bumped rather than defaulted silently: a v1
-# context would parse cleanly and hand the deep stage an empty signal block,
-# which reads as "no source fired today" when the truth is "this file predates
-# the sources". Forcing a discovery re-run is the honest failure.
-SCHEMA_VERSION = 2
+# v2 (M3) adds the signal layer. v3 (M6) names the research snapshot the queue
+# was built from. v4 (M6) carries the macro calendar as objects with their
+# confidence class, not just as rendered text. Bumped rather than defaulted
+# silently, every time: a v2 context would parse cleanly with an empty snapshot
+# id and the deep stage would go and download its own bars, and a v3 one would
+# parse with no macro events and let an indicative date gate an entry — the two
+# exact drifts M6 exists to remove. Forcing a discovery re-run is the honest
+# failure.
+SCHEMA_VERSION = 4
 
 
 @dataclass
@@ -54,8 +58,13 @@ class QueuedTicker:
     #: source name -> -1/0/+1 as read at decision time. The journal records this
     #: so `signals.accuracy` can grade each source against the realised move.
     signal_readings: dict[str, int] = field(default_factory=dict)
-    #: Points the signal layer added to this name's screener score.
+    #: Points the signal layer actually added to this name's screener score.
+    #: Zero while every source is shadowed (M6 item 1).
     signal_adjustment: float = 0.0
+    #: What it would have added at full trust. Kept beside the applied figure
+    #: so the deep stage inherits the same shadow/applied distinction the brief
+    #: shows, rather than reading 0.0 and concluding the layer said nothing.
+    signal_shadow_adjustment: float = 0.0
 
     def screener_markdown(self) -> str:
         if not self.screener:
@@ -88,10 +97,28 @@ class DeepContext:
     run_date: str
     market_context: str = "Market context unavailable."
     macro_note: str = "none scheduled"
+    #: The window's macro releases as objects, each with the confidence class of
+    #: its source. Carried alongside the rendered note because the deep stage
+    #: has to *enforce* the permitted-use matrix, and it cannot do that against
+    #: a paragraph — see :mod:`tradingagent.pipeline.macro_gate`.
+    macro_events: list[dict[str, Any]] = field(default_factory=list)
     data_as_of: str = "unknown"
     queue: list[QueuedTicker] = field(default_factory=list)
     discovery_degraded: list[str] = field(default_factory=list)
+    #: The research snapshot discovery screened against. The deep stage reads
+    #: bars from it rather than downloading its own, and refuses to reason from
+    #: a different one — see :mod:`tradingagent.snapshot`.
+    snapshot_id: str = ""
+    #: The session those bars belong to, ISO. Repeated here so the deep stage
+    #: can state its as-of even if the snapshot file is missing.
+    market_as_of: str = ""
     version: int = SCHEMA_VERSION
+
+    def macro_calendar(self):
+        """``macro_events`` as :class:`~..discovery.release_schedule.MacroEvent`."""
+        from ..discovery.release_schedule import MacroEvent
+
+        return [MacroEvent.from_dict(raw) for raw in self.macro_events]
 
     # -- persistence -----------------------------------------------------
     def to_json(self) -> str:

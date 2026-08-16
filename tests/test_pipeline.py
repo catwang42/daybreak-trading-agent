@@ -74,8 +74,12 @@ SAMPLES = {
                            concession="Valuation is rich."),
     ResearchPlan: ResearchPlan(recommendation="Overweight", resolution="Bull carried it.",
                                strategic_actions="Enter half size above 101."),
-    TraderProposal: TraderProposal(action="Buy", reasoning="Plan says Overweight.",
-                                   entry_price=101.0, stop_loss=98.0, position_sizing="3%"),
+    TraderProposal: TraderProposal(
+        action="Buy", reasoning="Plan says Overweight.",
+        entry_condition="Only on a close back above the 50-day.",
+        entry_type="pullback", entry_level=101.0,
+        invalidation_type="level", invalidation_level=98.0,
+    ),
     RiskTake: RiskTake(argument="Stop is too tight.", recommended_adjustment="Widen to 2 ATR."),
     PortfolioDecision: PortfolioDecision(
         rating="Overweight", confidence="M", price_target=125.0, time_horizon="4-8 weeks",
@@ -113,9 +117,9 @@ class FakeGateway:
 def test_optional_numeric_fields_accept_the_placeholder_strings_models_emit():
     """Models write 'N/A' into a nullable float instead of omitting it."""
     proposal = TraderProposal.model_validate(
-        {"action": "Hold", "reasoning": "Wait.", "entry_price": "N/A", "stop_loss": ""}
+        {"action": "Hold", "reasoning": "Wait.", "entry_level": "N/A", "invalidation_level": ""}
     )
-    assert proposal.entry_price is None and proposal.stop_loss is None
+    assert proposal.entry_level is None and proposal.invalidation_level is None
     decision = PortfolioDecision.model_validate(
         {**SAMPLES[PortfolioDecision].model_dump(), "price_target": "none"}
     )
@@ -306,6 +310,29 @@ def test_the_deep_report_carries_every_schema_section_and_the_verbatim_disclaime
     )
 
 
+def test_section_four_publishes_the_computed_table_not_the_model_s_own_numbers():
+    """The trader states intent; the arithmetic under it is the pipeline's.
+
+    The sample verdict targets 125 on a ~200 close, so the plan is also a live
+    check that an incoherent reward:risk is refused rather than printed.
+    """
+    result = analyze_ticker(FakeGateway(), evidence(), DegradedTracker(), rounds=1)
+    report = render_deep_report(result)
+    section = report[report.index("## 4. Trade Proposal"):report.index("## 5. Risk Review")]
+
+    assert "| Entry |" in section and "| Reward : risk |" in section
+    assert "Computed by the pipeline" in section
+    assert "NO TRADE — inconsistent plan" in section
+    assert result.trade_plan is not None and not result.trade_plan.actionable
+    # The seats critique the published arithmetic, not a paraphrase of it.
+    assert "no order path" in section
+
+
+def test_a_rejected_plan_says_so_in_the_brief_where_the_verdict_is_skimmed():
+    result = analyze_ticker(FakeGateway(), evidence(), DegradedTracker(), rounds=1)
+    assert "NO TRADE — inconsistent plan" in render_deep_index([result])
+
+
 def test_the_brief_index_links_each_ticker_to_its_deep_report():
     results = [analyze_ticker(FakeGateway(), evidence(), DegradedTracker(), rounds=1)]
     index = render_deep_index(results)
@@ -395,13 +422,14 @@ def test_blocking_gaps_ignores_the_permanent_social_sentiment_limit():
     assert ev.blocking_gaps() == []
 
     ev.news = []
-    assert ev.blocking_gaps() == ["company news"]
+    assert ev.blocking_gaps() == ["company news naming the company"]
 
     ev.indicators = None
     ev.fundamentals = None
     ev.positioning = None
     assert set(ev.blocking_gaps()) == {
-        "price history", "company fundamentals", "positioning data", "company news",
+        "price history", "company fundamentals", "positioning data",
+        "company news naming the company",
     }
 
     # And the checklist condition tracks it, not `missing`.
