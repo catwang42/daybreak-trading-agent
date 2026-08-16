@@ -378,3 +378,40 @@ def test_a_degraded_run_is_still_delivered(tmp_path, monkeypatch):
 def test_a_missing_brief_is_an_error_not_a_blank_email(tmp_path):
     with pytest.raises(E.DeliveryError, match="No brief"):
         E.send_daily_brief(RUN_DATE, tmp_path / "nope.md", config=cfg())
+
+
+def test_the_evidence_block_rides_in_the_body_and_not_in_the_attachment(tmp_path, monkeypatch):
+    """The attachment is the day's research and is archived as such.
+
+    The evidence block is a rolling statement about every prior day, so folding
+    it into the attached file would leave a brief on disk whose "Evidence so
+    far" section is wrong the moment another decision resolves.
+    """
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    brief = tmp_path / "daily-brief.md"
+    brief.write_text(BRIEF)
+
+    result = E.send_daily_brief(
+        RUN_DATE,
+        brief,
+        config=cfg(),
+        evidence="## Evidence so far\n\n4 resolved observations. INSUFFICIENT DATA.",
+    )
+
+    assert result.sent
+    sent = FakeSMTP.instances[-1].sent
+    body = sent.get_body(preferencelist=("plain",)).get_content()
+    assert "Evidence so far" in body
+    attachment = next(part for part in sent.iter_attachments())
+    assert "Evidence so far" not in attachment.get_content()
+    assert brief.read_text() == BRIEF  # the file on disk is untouched
+
+
+def test_no_evidence_leaves_the_body_exactly_as_the_brief(tmp_path, monkeypatch):
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    brief = tmp_path / "daily-brief.md"
+    brief.write_text(BRIEF)
+
+    E.send_daily_brief(RUN_DATE, brief, config=cfg(), evidence="   ")
+    body = FakeSMTP.instances[-1].sent.get_body(preferencelist=("plain",)).get_content()
+    assert body.strip() == BRIEF.strip()

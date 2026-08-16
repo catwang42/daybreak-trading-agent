@@ -59,12 +59,39 @@ def deep_report_paths(report_dir: Path) -> list[Path]:
     return sorted(deep_dir.glob("*.md")) if deep_dir.is_dir() else []
 
 
+#: Only Friday's brief carries the evidence block. Daily would be noise — a
+#: single session moves almost nothing in a rolling sample — and it is the same
+#: cadence as the weekly file the block summarises.
+EVIDENCE_WEEKDAY = 4
+
+
+def weekly_evidence(settings: Settings, run_date: date) -> str:
+    """Render Friday's "Evidence so far" block, and write the weekly file.
+
+    Best effort in the strongest sense: the evaluation lab reads records and
+    spends nothing, but it is downstream of the research and must never be the
+    reason the morning email does not arrive.
+    """
+    if run_date.weekday() != EVIDENCE_WEEKDAY:
+        return ""
+    try:
+        from ..evaluation.stage import run_evaluate
+
+        result = run_evaluate(settings)
+        log.info("Evidence block for week %s (%d resolved)", result.week, result.resolved)
+        return result.evidence
+    except Exception as exc:  # noqa: BLE001 - the brief ships regardless
+        log.warning("Weekly evidence unavailable (%s); sending the brief without it.", exc)
+        return ""
+
+
 def run_report(
     settings: Settings,
     *,
     verdicts: list[Verdict] | None = None,
     degraded: DegradedTracker | None = None,
     run_date: date | None = None,
+    evidence: str | None = None,
 ) -> DeliveryResult:
     """Email the brief for ``run_date``, attaching it and every deep report."""
     run_date = run_date or settings.run_date
@@ -81,12 +108,16 @@ def run_report(
     else:
         sources = []
 
+    if evidence is None:
+        evidence = weekly_evidence(settings, run_date)
+
     return send_daily_brief(
         run_date,
         brief_path,
         deep_paths=deep_report_paths(report_dir),
         verdicts=verdicts,
         degraded_sources=sources,
+        evidence=evidence,
     )
 
 

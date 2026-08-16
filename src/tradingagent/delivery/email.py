@@ -339,11 +339,18 @@ def send_daily_brief(
     verdicts: list[Verdict] | None = None,
     degraded_sources: list[str] | None = None,
     config: EmailConfig | None = None,
+    evidence: str = "",
 ) -> DeliveryResult:
     """Send the brief. Returns a result; raises only when a send was attempted and failed.
 
     Missing configuration is a skip, not an error: a local run with no SMTP
     settings should finish normally rather than fail at the last step.
+
+    ``evidence`` is the weekly "Evidence so far" block. It is appended to the
+    *body* and deliberately not to the attached brief: the attachment is the
+    day's research and is archived as such, while the evidence is a rolling
+    statement about every day before it. Mixing them would leave a file on disk
+    whose "Evidence so far" section is wrong the moment another day resolves.
     """
     config = config or load_email_config()
     subject = build_subject(run_date, verdicts or [], degraded_sources)
@@ -357,7 +364,10 @@ def send_daily_brief(
         raise DeliveryError(f"No brief to send at {brief_path}")
 
     attachments, dropped = collect_attachments(brief_path, [Path(p) for p in (deep_paths or [])])
-    message = build_message(config, subject, brief_path.read_text(encoding="utf-8"), attachments)
+    body = brief_path.read_text(encoding="utf-8")
+    if evidence.strip():
+        body = f"{body.rstrip()}\n\n---\n\n{evidence.strip()}\n"
+    message = build_message(config, subject, body, attachments)
     send_message(config, message)
 
     log.info("Emailed %r to %s", subject, ", ".join(config.recipients))
