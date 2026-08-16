@@ -216,15 +216,24 @@ def build_provenance(
     settings: Settings,
     snapshot: ResearchSnapshot | None = None,
     *,
+    snapshot_id: str = "",
+    market_as_of: str = "",
     backfilled: bool = False,
 ) -> Provenance:
-    """Fingerprint this run. Cheap enough to call once per stage."""
-    snapshot_id = snapshot.snapshot_id if snapshot else ""
+    """Fingerprint this run. Cheap enough to call once per stage.
+
+    ``snapshot_id`` is for the stages that hold an id but not the object — the
+    options overlay carries the equity snapshot's id in its context and takes a
+    second, later snapshot of its own for quotes. It must file under the first:
+    the overlay is part of the day's experiment, not a new one.
+    """
+    snapshot_id = snapshot_id or (snapshot.snapshot_id if snapshot else "")
+    market_as_of = market_as_of or (snapshot.market_as_of.isoformat() if snapshot else "")
     return Provenance(
         run_id=run_id_for(settings.run_date, snapshot_id),
         run_date=settings.run_date.isoformat(),
         snapshot_id=snapshot_id,
-        market_as_of=snapshot.market_as_of.isoformat() if snapshot else "",
+        market_as_of=market_as_of,
         git_commit=git_commit(),
         config_hash=config_hash(settings),
         models={

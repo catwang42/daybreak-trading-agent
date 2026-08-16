@@ -471,6 +471,38 @@ def test_a_direction_is_still_read_and_journaled_while_shadowed():
     assert bundle.net_direction() == -1
 
 
+def test_the_shadow_total_can_be_attributed_back_to_the_sources_that_wanted_it():
+    """M7 grades sources, not bundles, and a fused total cannot be decomposed later."""
+    bundle = SignalBundle(
+        symbol="TST", run_date=RUN,
+        ticker_signals=[
+            sig(source="news_tone", direction=1, strength=1.0),
+            sig(source="insider", direction=-1, strength=0.5),
+        ],
+    )
+    shares = bundle.per_source_shadow()
+    assert shares["news_tone"] == pytest.approx(MAX_SCORE_ADJUSTMENT / 2)
+    assert shares["insider"] == pytest.approx(-MAX_SCORE_ADJUSTMENT / 4)
+    # Un-clamped, the shares are exactly the fused figure — the disagreement is
+    # visible as two opposed contributions rather than as one muted number.
+    assert sum(shares.values()) == pytest.approx(bundle.shadow_adjustment())
+
+
+def test_a_source_firing_twice_for_one_ticker_contributes_once():
+    bundle = SignalBundle(
+        symbol="TST", run_date=RUN,
+        ticker_signals=[
+            sig(source="news_tone", direction=1, strength=1.0),
+            sig(source="news_tone", direction=-1, strength=1.0),
+        ],
+    )
+    assert bundle.per_source_shadow() == {"news_tone": pytest.approx(0.0)}
+
+
+def test_a_bundle_with_no_ticker_signals_attributes_nothing():
+    assert SignalBundle(symbol="TST", run_date=RUN).per_source_shadow() == {}
+
+
 def test_a_graduated_source_is_capped_by_its_own_rung_not_the_ceiling():
     signals = [sig(source="earned", direction=1, strength=1.0)]
     bundle = SignalBundle(

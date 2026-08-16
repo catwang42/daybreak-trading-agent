@@ -117,8 +117,16 @@ def run_portfolio_manager(
     degraded: DegradedTracker,
     proposal_error: str | None = None,
     trade_plan=None,
+    tier: str = "deep",
 ) -> tuple[PortfolioDecision | None, str | None]:
-    """One DEEP-tier call. Returns ``(decision, error)``; never raises."""
+    """One call on ``tier``. Returns ``(decision, error)``; never raises.
+
+    ``tier`` defaults to DEEP and is an A/B arm (``--pm-tier``), not a tuning
+    knob: the milestone question is whether the most expensive seat in the
+    pipeline buys a measurably better verdict than the SMART tier, and that is
+    settled by running days on each and grading them apart — never by choosing
+    per ticker, which would confound the comparison with the ticker.
+    """
     checklist, confirmed, total = confidence_checklist(evidence, analysts, debate, proposal, risk)
     prompt = render(
         "portfolio_manager",
@@ -137,7 +145,7 @@ def run_portfolio_manager(
         degraded_note=evidence_quality_note(evidence, analysts),
     )
     try:
-        return gateway.complete(prompt, tier="deep", schema=PortfolioDecision), None
+        return gateway.complete(prompt, tier=tier, schema=PortfolioDecision), None
     except LLMError as exc:
         reason = str(exc)[:200]
         degraded.add(f"Portfolio manager {evidence.symbol}", reason)

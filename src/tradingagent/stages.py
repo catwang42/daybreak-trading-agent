@@ -41,6 +41,9 @@ from .discovery.shortlist import (
     market_commentary,
     select_with_signals,
 )
+from .evaluation import record as ledger_record
+from .evaluation.ledger import CANDIDATES, DECISIONS, RUNS, ExperimentLedger
+from .evaluation.provenance import build_provenance
 from .journal import (
     append_entries,
     entries_from_deep,
@@ -586,6 +589,48 @@ def run_discovery(
     written = append_entries(
         settings.journal_path, entries_from_shortlist(shortlist, run_date, report_rel)
     )
+
+    # --- experiment ledger (M7) --------------------------------------------
+    # The whole screened pool, not the shortlist: the names this screen passed
+    # over are the only thing its ranking can be graded against.
+    ledger_store = ExperimentLedger(settings.ledger_root)
+    provenance = build_provenance(settings, snapshot)
+    ledger_record.write(
+        ledger_store,
+        RUNS,
+        [
+            ledger_record.run_record(
+                provenance,
+                "discovery",
+                started_at=f"{utcnow():%Y-%m-%dT%H:%M:%SZ}",
+                universe_size=len(constituents),
+                candidates=len(candidates),
+                shortlisted=len(shortlist),
+                queued=len(deep_context.queue),
+                degraded=degraded.sources,
+                notes=[hub.shadow.note()] if hub.shadow else [],
+            )
+        ],
+    )
+    ledger_record.write(
+        ledger_store,
+        CANDIDATES,
+        ledger_record.candidate_records(
+            provenance,
+            run_date,
+            candidates,
+            eligible=eligible,
+            shortlist=shortlist,
+            hub=hub,
+            queued=[q.symbol for q in deep_context.queue],
+        ),
+    )
+    ledger_record.write(
+        ledger_store,
+        DECISIONS,
+        ledger_record.discovery_decisions(provenance, shortlist, run_date, report_rel),
+    )
+
     return DiscoveryResult(
         context=context,
         report_path=str(path),
@@ -644,9 +689,39 @@ def run_deep(
     elif patch_brief:
         degraded.add("Daily brief", f"no brief at {brief_path} to link the deep reports into")
 
+    report_prefix = f"reports/{context.run_date}/deep"
     written = append_entries(
-        settings.journal_path,
-        entries_from_deep(results, context.date, f"reports/{context.run_date}/deep"),
+        settings.journal_path, entries_from_deep(results, context.date, report_prefix)
+    )
+
+    ledger_store = ExperimentLedger(settings.ledger_root)
+    # The snapshot actually in use wins; the context's id is the fallback for a
+    # run whose snapshot would not load, so the rows still file under the day.
+    provenance = build_provenance(
+        settings,
+        snapshot,
+        snapshot_id=("" if snapshot else context.snapshot_id),
+        market_as_of=("" if snapshot else context.market_as_of),
+    )
+    ledger_record.write(
+        ledger_store,
+        RUNS,
+        [
+            ledger_record.run_record(
+                provenance,
+                "deep",
+                started_at=f"{utcnow():%Y-%m-%dT%H:%M:%SZ}",
+                queued=len(context.queue),
+                candidates=len(results),
+                degraded=degraded.sources,
+                notes=[f"portfolio manager on the {settings.pm_tier} tier"],
+            )
+        ],
+    )
+    ledger_record.write(
+        ledger_store,
+        DECISIONS,
+        ledger_record.deep_decisions(provenance, results, context.date, report_prefix),
     )
 
     # The options stage needs the verdicts and the levels, not the transcripts.
@@ -758,10 +833,37 @@ def run_options(
     elif patch_brief:
         degraded.add("Daily brief", f"no brief at {brief_path} to publish the overlay into")
 
+    report_prefix = f"reports/{context.run_date}/deep"
     written = append_entries(
-        settings.journal_path,
-        entries_from_options(plans, context.date, f"reports/{context.run_date}/deep"),
+        settings.journal_path, entries_from_options(plans, context.date, report_prefix)
     )
+
+    ledger_store = ExperimentLedger(settings.ledger_root)
+    # The equity snapshot, not the quote one: the overlay is the same day's
+    # experiment and has to file under the same run id.
+    provenance = build_provenance(
+        settings, snapshot_id=context.snapshot_id, market_as_of=context.market_as_of
+    )
+    ledger_record.write(
+        ledger_store,
+        RUNS,
+        [
+            ledger_record.run_record(
+                provenance,
+                "options",
+                started_at=f"{utcnow():%Y-%m-%dT%H:%M:%SZ}",
+                candidates=len(plans),
+                degraded=degraded.sources,
+                notes=[feed_note] if feed_note else [],
+            )
+        ],
+    )
+    ledger_record.write(
+        ledger_store,
+        DECISIONS,
+        ledger_record.options_decisions(provenance, plans, context.date, report_prefix),
+    )
+
     return OptionsStageResult(
         plans=plans,
         report_paths=paths,
