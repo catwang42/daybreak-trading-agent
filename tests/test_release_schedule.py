@@ -421,6 +421,56 @@ def test_every_way_a_model_writes_do_not_enter_yet_is_caught(phrase):
     assert suppressed_gates({"The trader's reasoning": phrase.capitalize() + "."}, [guess])
 
 
+#: Verbatim from the reports that shipped on 2026-08-14 and 2026-08-16. Each
+#: puts several words — a size, a level, a whole confirmation clause — between
+#: the waiting verb and the release it waits for, which is exactly the shape the
+#: first matcher missed.
+SHIPPED_WORDING = [
+    # KMI.md, risk debate
+    "do not initiate the 1.5% tranche at 32.82 before PPI/Retail Sales clear",
+    # V.md, risk debate
+    "do not size up to full 1.5-2% until both the $358.71 hold is confirmed on a "
+    "closing basis AND PPI/Retail Sales prints are in hand",
+    # DIS.md, portfolio manager
+    "Do not add exposure ahead of the unconfirmed 2026-08-20 jobless claims print",
+    # The two shapes the carry-over named, in the reports' own register
+    "Hold the starter tranche until Retail Sales prints",
+    "Do not enter before the PPI release",
+]
+
+
+@pytest.mark.parametrize("phrase", SHIPPED_WORDING)
+def test_a_wait_survives_words_between_the_verb_and_the_release(phrase):
+    calendar = [GUESSED_PPI, GUESSED_RETAIL,
+                MacroEvent(date(2026, 8, 20), "Initial Jobless Claims", "Medium",
+                           "static release schedule", INDICATIVE)]
+    notes = suppressed_gates({"The trader's reasoning": phrase + "."}, calendar)
+    assert notes, f"unsuppressed: {phrase}"
+    assert "not part of the plan" in notes[0]
+
+
+def test_a_release_named_far_from_the_wait_is_still_not_a_gate():
+    """Broadening the verbs must not turn every mention into a suppression.
+
+    The window is the guard: a release named a hundred characters past the
+    waiting phrase belongs to a different clause.
+    """
+    filler = "the setup is clean and the base is intact, " * 3
+    notes = suppressed_gates(
+        {"The thesis": f"Do not add here. {filler} Margins held through three PPI prints."},
+        [GUESSED_PPI],
+    )
+    assert notes == []
+
+
+def test_a_wait_on_something_that_is_not_a_macro_release_is_left_alone():
+    notes = suppressed_gates(
+        {"The trader's entry condition": "Hold the position until the 50-day SMA is reclaimed."},
+        [GUESSED_PPI, GUESSED_RETAIL],
+    )
+    assert notes == []
+
+
 def test_the_same_suppression_is_reported_once_per_role():
     line = "Wait for the PPI print."
     notes = suppressed_gates(

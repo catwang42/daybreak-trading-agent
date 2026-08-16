@@ -31,18 +31,38 @@ from datetime import date
 
 from ..discovery.release_schedule import VERIFIED, MacroEvent
 
+#: Words that may sit between a waiting verb and the preposition it governs:
+#: "hold **the position** until", "wait **for a confirmed close** through".
+#: Bounded at four because past that the two halves stop being one instruction.
+_GAP = r"(?:\s+[\w.,%$/()-]+){0,4}"
+
 #: Ways a model writes "do not enter yet". Deliberately broad: a false positive
 #: costs one printed line, a false negative costs a trade taken on a wrong date.
+#:
+#: The shipped reports write these with the levels in the middle — KMI's "do not
+#: initiate the 1.5% tranche at 32.82 before PPI/Retail Sales clear" and V's "do
+#: not size up to full 1.5-2% until ... PPI/Retail Sales prints are in hand" both
+#: put six words between the verb and the wait. Matching only the tight
+#: verb+preposition forms missed them, so the bare prepositions are listed in
+#: their own right and the verb forms tolerate a gap.
 _WAIT_WORDS = (
-    r"wait(?:ing)?\s+(?:for|until|till|on)",
-    r"hold(?:ing)?\s+off\s+(?:for|until|till)",
+    rf"wait(?:ing|s)?{_GAP}\s+(?:for|until|till|on|through)",
+    rf"hold(?:ing|s)?(?:\s+off)?{_GAP}\s+(?:for|until|till|through)",
+    rf"defer(?:red|ring|s)?{_GAP}\s+(?:until|to|past)",
     r"after\s+(?:the\s+)?(?:release|print|report)?",
     r"ahead\s+of",
-    r"until\s+after",
+    # On their own, not only after a verb: "do not enter before X" and "hold
+    # until X prints" are the two commonest shapes and neither has a wait verb
+    # adjacent to its preposition.
+    r"\buntil\b",
+    r"\bbefore\b",
     r"post[- ]",
     r"pending",
     r"once\s+(?:the\s+)?",
-    r"not\s+before",
+    # A negated imperative names no preposition of its own for several words,
+    # so it is matched at the verb: the window then reaches the release.
+    r"(?:do\s+not|do\s*n[o']t|don'?t|avoid|no)\s+(?:[\w.,%$/()-]+\s+){0,6}?"
+    r"(?:enter|entry|initiat\w+|add\w*|buy\w*|siz\w+|chas\w+|commit\w*)",
 )
 _WAIT = re.compile("|".join(_WAIT_WORDS), re.I)
 
