@@ -56,6 +56,7 @@ from .options.stage import run_plans
 from .options.strategist import OptionsPlan
 from .pipeline.context import DeepContext, QueuedTicker
 from .pipeline.deep import DeepResult, TierCost, run_queue
+from .presentation.build import build_presentation_context
 from .report.deep import OPTIONS_HEADING as DEEP_OPTIONS_HEADING, render_deep_index, render_deep_report
 from .report.options import render_options_index, render_options_section
 from .report.render import (
@@ -64,7 +65,7 @@ from .report.render import (
     ReportContext,
     render_daily_brief,
 )
-from .report.writer import replace_section, write_report
+from .report.writer import mirror_json, replace_section, write_report
 from .signals import SignalHub, build_default_hub
 from .signals.accuracy import AccuracyReport, AccuracyTracker, realised_return
 from .semantics import guard_block
@@ -85,6 +86,10 @@ class DiscoveryResult:
     deep_context: DeepContext | None = None
     #: The run's one market picture, handed to the later stages in memory.
     snapshot: ResearchSnapshot | None = None
+    #: SPY's own history. Not in the snapshot — the snapshot keeps bars for the
+    #: queue, and SPY is a benchmark rather than a candidate — but the decision
+    #: sheet's market chart is drawn from it, so it rides along in memory.
+    spy_bars: pd.DataFrame | None = None
 
 
 def build_signal_hub(
@@ -637,6 +642,7 @@ def run_discovery(
         journal_written=written,
         deep_context=deep_context,
         snapshot=snapshot,
+        spy_bars=spy_bars.get("SPY"),
     )
 
 
@@ -920,4 +926,29 @@ def run_all(
         render_daily_brief(ctx),
         settings.reports_bucket,
     )
+
+    # The decision sheet's inputs, frozen while every object still exists. Last,
+    # so it sees the overlay; before delivery, so `--stage report` tomorrow
+    # rebuilds the same email from the same numbers rather than from the prose
+    # this brief just rendered. Never fatal: the research is already on disk and
+    # the email degrades to the sections it can still build.
+    try:
+        presentation = build_presentation_context(
+            settings.run_date,
+            ctx,
+            deep.results,
+            options.plans,
+            snapshot=discovery.snapshot,
+            spy_frame=discovery.spy_bars,
+            macro_events=(
+                discovery.deep_context.macro_calendar() if discovery.deep_context else []
+            ),
+            market_as_of=discovery.snapshot.market_as_of if discovery.snapshot else None,
+        )
+        path = presentation.write(settings.report_dir())
+        mirror_json(settings.reports_bucket, path)
+        log.info("Presentation context written to %s", path)
+    except Exception as exc:  # noqa: BLE001 - the reports are already published
+        log.warning("Presentation context not written (%s); the email will degrade.", exc)
+
     return discovery, deep, options
