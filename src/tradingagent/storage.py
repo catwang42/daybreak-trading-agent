@@ -58,6 +58,19 @@ def blob_name(local_path: Path) -> str:
         return path.name
 
 
+def console_url(bucket: str, local_path: Path) -> str:
+    """A clickable link to one object, for the email's size-cap fallback.
+
+    Deliberately a Cloud Console URL and not ``storage.googleapis.com``: the
+    bucket is private, so the direct URL returns 403 in a mail client and looks
+    like a broken link. The console link asks the reader to be signed in, which
+    they already are, and it is the same thing that would be true of any link to
+    a private object.
+    """
+    name = blob_name(local_path)
+    return f"https://console.cloud.google.com/storage/browser/_details/{normalize_bucket(bucket)}/{name}"
+
+
 def _bucket_handle(bucket: str):
     """Return a GCS bucket handle, or None when the cloud is unreachable."""
     try:

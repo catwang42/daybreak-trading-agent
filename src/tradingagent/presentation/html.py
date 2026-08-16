@@ -500,6 +500,11 @@ def render_text(sheet: DecisionSheet) -> str:
     if context is None:
         out += ["The decision sheet's data file is missing for this session.", ""]
         out += sheet.unavailable
+        # The evidence line is a rolling statement about every prior session and
+        # does not depend on today's context. Dropping it here would silently
+        # lose Friday's record on exactly the runs that went least well.
+        if sheet.evidence:
+            out += ["", "EVIDENCE SO FAR", sheet.evidence.strip()]
         return "\n".join(out)
 
     out += [f"Market data as of {context.market_as_of} close", ""]
