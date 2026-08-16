@@ -1,4 +1,4 @@
-"""Entrypoint: ``python -m tradingagent [--stage discovery|deep|options|report|all]``.
+"""Entrypoint: ``python -m tradingagent [--stage discovery|deep|options|report|all|outcomes|evaluate]``.
 
 Runs headless in a container (Cloud Run Jobs) or from a shell. Asserts
 ``ALPACA_PAPER=true`` at startup — the process refuses to start otherwise.
@@ -115,6 +115,15 @@ def main(
     from .stages import run_all, run_deep, run_discovery, run_options
 
     def dispatch() -> None:
+        if stage in (Stage.outcomes, Stage.evaluate):
+            from .evaluation.stage import run_evaluate, run_outcomes
+
+            if stage is Stage.outcomes:
+                _echo_outcomes(run_outcomes(settings))
+            else:
+                _echo_evaluate(run_evaluate(settings))
+            return
+
         if stage is Stage.report:
             # Re-delivery only: no market data, no LLM calls, no journal writes.
             try:
@@ -290,6 +299,29 @@ def _echo_options(settings, options) -> None:
     )
     if options.degraded.entries:
         typer.secho(f"DEGRADED: {', '.join(options.degraded.sources)}", fg="yellow")
+
+
+def _echo_outcomes(result) -> None:
+    typer.echo("")
+    typer.secho(
+        f"Outcomes: {result.resolved} newly resolved · {result.updated} updated · "
+        f"{result.pending} pending in {result.seconds:.1f}s",
+        fg="green",
+    )
+    typer.echo(f"As of:    {result.as_of} (latest session in the bars, not the wall clock)")
+    typer.echo(f"Complete: {result.complete} decision(s) have every horizon")
+    for note in result.notes[:10]:
+        typer.echo(f"  · {note}")
+    if len(result.notes) > 10:
+        typer.echo(f"  · ...and {len(result.notes) - 10} more")
+    if result.degraded.entries:
+        typer.secho(f"DEGRADED: {', '.join(result.degraded.sources)}", fg="yellow")
+
+
+def _echo_evaluate(result) -> None:
+    typer.echo("")
+    typer.secho(f"Evaluation: week {result.week} -> {result.path}", fg="green")
+    typer.echo(f"Resolved:   {result.resolved} observation(s) in {result.seconds:.1f}s")
 
 
 def _echo_delivery(result) -> None:
