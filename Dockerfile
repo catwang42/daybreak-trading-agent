@@ -9,8 +9,31 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/src
 
 WORKDIR /app
+
+# WeasyPrint renders the PDF attachments through pango/cairo, which are C
+# libraries pip cannot supply; python:3.11-slim ships none of them. Without
+# these the import raises OSError at runtime and every attachment silently
+# falls back to markdown, so they are installed here rather than discovered in
+# production. fonts-dejavu-core is the smallest font set that keeps the tables
+# from rendering as boxes; matplotlib finds it through the same fontconfig.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        libpango-1.0-0 \
+        libpangoft2-1.0-0 \
+        libharfbuzz0b \
+        libcairo2 \
+        libgdk-pixbuf-2.0-0 \
+        libffi8 \
+        fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Matplotlib writes a font cache on first use and the runtime user's home is
+# not guaranteed writable in Cloud Run; point it somewhere it owns.
+ENV MPLCONFIGDIR=/app/.mplconfig \
+    MPLBACKEND=Agg
 
 COPY src/ src/
 COPY config/report-schema.md config/preferences.md config/
@@ -23,7 +46,7 @@ COPY config/report-schema.md config/preferences.md config/
 # them owned by the runtime user so dropping root does not turn the first write
 # into a permission error at the end of a run that already spent its tokens.
 RUN useradd --create-home --uid 1000 agent \
-    && mkdir -p /app/reports /app/journal \
+    && mkdir -p /app/reports /app/journal /app/.mplconfig \
     && chown -R agent:agent /app
 USER agent
 

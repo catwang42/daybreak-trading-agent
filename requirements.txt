@@ -22,6 +22,17 @@ lxml==6.1.1          # pandas.read_html backend for universe.fetch_live()
 # directly and a transitive dependency is not a promise.
 markdown-it-py==4.2.0
 
+# Charts for the decision sheet, drawn headless (Agg) into PNGs that ride along
+# as inline attachments. Pillow arrives with it and is what writes the PNG.
+matplotlib==3.10.7
+
+# The daily brief and each deep report are attached as PDFs rather than as
+# markdown, because a phone renders a PDF and does not render a .md. WeasyPrint
+# needs pango/cairo from the OS — see the apt-get line in the Dockerfile. If
+# those libraries are unavailable the presentation layer falls back to
+# attaching markdown, so this dependency is not load-bearing for delivery.
+weasyprint==69.0
+
 # --- Persistence ---
 # Mirrors reports and the journal when REPORTS_BUCKET is set. Also arrives via
 # google-cloud-aiplatform, but storage.py imports it by name, so it is pinned.
