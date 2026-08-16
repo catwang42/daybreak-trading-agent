@@ -18,10 +18,11 @@ So:
   chart supports one, a level; an invalidation *type* and a level. Both are
   levels a reader can find on a chart, not results of a calculation.
 - :func:`build_trade_plan` computes the rest and asserts the plan is coherent:
-  the stop is on the losing side of the entry, the risk fits the cap, the
-  reward-to-risk clears the floor, and every price traces to the same snapshot.
-  A plan that fails an assertion is not silently softened — it is published as
-  ``NO TRADE — inconsistent plan`` with the reason.
+  the stop is on the losing side of the entry, the distance to it is inside the
+  cap and outside the noise floor, the reward-to-risk clears its floor, and
+  every price traces to the same snapshot. A plan that fails an assertion is not
+  silently softened — it is published as ``NO TRADE — inconsistent plan`` with
+  the reason.
 - :func:`quoted_figure_corrections` reads the model's prose back and flags any
   figure that disagrees with the computed plan, so the STZ case would print a
   correction instead of a contradiction.
@@ -43,6 +44,16 @@ Direction = Literal["long", "short", "flat"]
 #: rejects setups wider than 12%; by the time a stop has been argued down by a
 #: risk committee, anything past 8% is a different trade from the one screened.
 MAX_RISK_PCT = 8.0
+#: Narrowest one. A stop must sit outside the noise the entry is measured in, so
+#: the floor is half a day's true range or a flat fraction of the entry,
+#: whichever is larger. WMB published a $73.17 stop against a $73.20 entry: three
+#: cents, 0.04%, which passed every other assertion here — the stop was on the
+#: losing side, the risk was under the cap, and the R multiple came out at 293×
+#: on a $82 target. It also asked for the maximum position, because the size
+#: formula divides the risk budget by the stop distance. A stop inside the tick
+#: noise is not an invalidation level; it is a division by almost zero.
+MIN_RISK_ATR_FRACTION = 0.5
+MIN_RISK_PCT = 0.3
 #: A target closer than this to the stop is not worth the spread.
 MIN_REWARD_RISK = 1.5
 #: Portfolio fraction risked per idea. Size follows from this and the stop
@@ -117,7 +128,8 @@ class TradePlan:
             f"| Entry | {_money(self.entry)} | {self.entry_basis or '—'} |",
             f"| Stop | {_money(self.stop)} | {self.stop_basis or '—'} |",
             f"| Risk / share | {_money(self.risk_per_share)} | entry − stop |",
-            f"| Risk | {_pct(self.risk_pct)} | risk per share ÷ entry (cap {MAX_RISK_PCT:.0f}%) |",
+            f"| Risk | {_pct(self.risk_pct)} | risk per share ÷ entry (cap {MAX_RISK_PCT:.0f}%, "
+            f"floor {MIN_RISK_PCT:.1f}% or {MIN_RISK_ATR_FRACTION:g} × ATR(14), whichever is wider) |",
             f"| Target | {_money(self.target)} | {self.target_basis or '—'} |",
             f"| Reward : risk | {_x(self.reward_risk)} | (target − entry) ÷ risk per share "
             f"(floor {MIN_REWARD_RISK:.1f}×) |",
@@ -210,6 +222,16 @@ def build_trade_plan(
         )
     if plan.risk_per_share == 0:
         plan.failures.append("the stop and the entry are the same price")
+    else:
+        floor, floor_basis = _min_risk_per_share(plan.entry, evidence)
+        if floor is not None and plan.risk_per_share < floor:
+            plan.failures.append(
+                f"the stop is {_money(plan.risk_per_share)} from the {_money(plan.entry)} entry "
+                f"({plan.risk_pct:.2f}%), inside the {_money(floor)} minimum ({floor_basis}) — a "
+                f"stop that tight is inside the day's noise, and dividing the "
+                f"{RISK_BUDGET_PCT:.2f}% risk budget by it asks for the full "
+                f"{MAX_POSITION_PCT:.0f}% position"
+            )
 
     plan.target, plan.target_basis = _target(target, plan)
     if plan.target is not None and plan.risk_per_share:
@@ -300,6 +322,22 @@ def _stop(evidence, proposal, plan: TradePlan) -> tuple[float | None, str]:
         return None, ""
     stop = entry - 2 * atr if plan.direction == "long" else entry + 2 * atr
     return stop, f"2 × ATR(14) {atr:,.2f} from the entry (no usable invalidation level)"
+
+
+def _min_risk_per_share(entry: float, evidence) -> tuple[float | None, str]:
+    """The narrowest stop distance this ticker's own volatility supports.
+
+    ``max(0.5 × ATR(14), 0.3% of entry)``. The ATR term is the real test — half a
+    day's range is a level price crosses on an ordinary morning — and the flat
+    percentage is the backstop for a ticker whose ATR we could not compute.
+    """
+    if not entry:
+        return None, ""
+    percent_floor = entry * MIN_RISK_PCT / 100
+    atr = _number(evidence.indicators.get("atr")) if getattr(evidence, "indicators", None) else None
+    if atr and MIN_RISK_ATR_FRACTION * atr >= percent_floor:
+        return MIN_RISK_ATR_FRACTION * atr, f"{MIN_RISK_ATR_FRACTION:g} × ATR(14) {_money(atr)}"
+    return percent_floor, f"{MIN_RISK_PCT:.1f}% of entry" + ("" if atr else ", no ATR available")
 
 
 def _stop_word(kind: str) -> str:

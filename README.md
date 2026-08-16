@@ -236,9 +236,16 @@ reference that was no longer the entry. A human sizing off 2.5% would have taken
 risk than they thought.
 
 - The plan is asserted before it is published: the stop must be on the losing side of the
-  entry, risk ≤ 8% of entry, reward:risk ≥ 1.5×, and every price must trace to the same
-  snapshot. A plan that fails is published as **`NO TRADE — inconsistent plan`** with the
-  reason, in the deep report and in the brief's index — never quietly softened.
+  entry, risk ≤ 8% of entry **and ≥ the noise floor**, reward:risk ≥ 1.5×, and every price
+  must trace to the same snapshot. A plan that fails is published as
+  **`NO TRADE — inconsistent plan`** with the reason, in the deep report and in the
+  brief's index — never quietly softened.
+- The noise floor is `max(0.5 × ATR(14), 0.3% of entry)`, and it is the newest assertion
+  because WMB published a $73.17 stop under a $73.20 entry. Three cents passed every
+  other check — losing side, 0.04% risk, 293× reward:risk — and, because size is the risk
+  budget divided by the stop distance, it earned the maximum position. All three risk
+  seats then spent their turn arguing the stop was an artifact. A stop inside half a day's
+  range is not an invalidation level; it is a division by almost zero.
 - Size is derived, not stated: 0.5% of the portfolio at risk ÷ the stop distance, capped
   at 10%. A tighter stop earns a bigger position; that is the only way it grows.
 - A proposed level more than 25% from the close, or on the wrong side of it for the entry

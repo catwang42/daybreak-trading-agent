@@ -17,6 +17,7 @@ from tradingagent.pipeline.schemas import TraderProposal
 from tradingagent.pipeline.trade_plan import (
     FLAT,
     MAX_POSITION_PCT,
+    MAX_RISK_PCT,
     NO_TRADE,
     PLAN,
     UNPRICED,
@@ -31,7 +32,7 @@ MARKET = date(2026, 8, 14)
 SNAPSHOT = "snap-2026-08-14-abc123"
 
 
-def evidence(last=100.0, priced=True, bars=True, symbol="TST", snapshot_id=SNAPSHOT):
+def evidence(last=100.0, priced=True, bars=True, symbol="TST", snapshot_id=SNAPSHOT, atr=None):
     """An evidence pack carrying one snapshot-stamped close."""
     ev = Evidence(
         queued=QueuedTicker(symbol=symbol, name="Test Co", sector="Utilities", priority=7),
@@ -56,6 +57,11 @@ def evidence(last=100.0, priced=True, bars=True, symbol="TST", snapshot_id=SNAPS
             index=pd.date_range("2024-01-01", periods=len(closes), freq="B"),
         )
         ev.indicators = compute_indicators(symbol, frame)
+    if atr is not None:
+        # Pinned so the noise floor in the failure message is a fixed number.
+        for indicator in ev.indicators.indicators:
+            if indicator.key == "atr":
+                indicator.value = atr
     if priced:
         ev.price_observation = Observation(
             value=last,
@@ -160,6 +166,58 @@ def test_risk_past_the_cap_is_a_no_trade_however_good_the_thesis():
                             target=160.0)
     assert plan.status == NO_TRADE
     assert any("past the 8% cap" in f for f in plan.failures)
+
+
+def test_the_wmb_regression_a_three_cent_stop_is_not_an_invalidation_level():
+    """WMB, 2026-08-16: a $73.17 stop under a $73.20 entry.
+
+    Verbatim from the shipped report. Every assertion in place at the time was
+    satisfied — the stop was on the losing side, 0.04% of risk sat well inside
+    the 8% cap, and the $82 target came out at 293× reward:risk — so the plan
+    published, and because size is the risk budget divided by the stop distance,
+    it published at the maximum position. All three risk seats then spent their
+    turn arguing that the stop was an artifact. The arithmetic should have said
+    so first.
+    """
+    plan = build_trade_plan(
+        evidence(last=75.20, atr=1.85),
+        proposal(entry_type="pullback", entry_level=73.20,
+                 invalidation_type="moving_average", invalidation_level=73.17),
+        "Overweight",
+        target=82.00,
+    )
+
+    assert plan.entry == 73.20 and plan.stop == 73.17
+    assert round(plan.risk_per_share, 2) == 0.03
+    assert plan.status == NO_TRADE and not plan.actionable
+    floor = [f for f in plan.failures if "minimum" in f]
+    assert len(floor) == 1, plan.failures
+    assert "$0.03 from the $73.20 entry (0.04%)" in floor[0]
+    assert "inside the $0.93 minimum (0.5 × ATR(14) $1.85)" in floor[0]
+    # And nothing else objected: this is the whole point of the regression.
+    assert plan.failures == floor
+    assert plan.risk_pct < MAX_RISK_PCT and plan.reward_risk > 200
+
+
+def test_the_noise_floor_falls_back_to_a_flat_fraction_when_there_is_no_atr():
+    plan = build_trade_plan(
+        evidence(last=100.0, bars=False), proposal(invalidation_level=99.8), "Buy", target=140.0
+    )
+    assert plan.status == NO_TRADE
+    assert any("0.3% of entry, no ATR available" in f for f in plan.failures)
+
+
+def test_a_stop_outside_the_noise_floor_is_published_as_written():
+    plan = build_trade_plan(
+        evidence(last=100.0, atr=2.0), proposal(invalidation_level=98.9), "Buy", target=112.0
+    )
+    assert plan.status == PLAN and round(plan.risk_per_share, 2) == 1.10
+    assert plan.size_pct == MAX_POSITION_PCT  # tight, but tight for a real reason
+
+
+def test_the_table_states_the_floor_next_to_the_cap():
+    table = build_trade_plan(evidence(), proposal(), "Buy", target=112.0).table()
+    assert "cap 8%, floor 0.3% or 0.5 × ATR(14), whichever is wider" in table
 
 
 def test_a_target_that_does_not_pay_for_the_stop_is_a_no_trade():
