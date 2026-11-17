@@ -13,7 +13,7 @@ A provider-agnostic Python application, built with Claude Code as the coding ass
 | M5 | `--stage report` — email delivery, GCS persistence, Cloud Run Jobs schedule | **done** |
 | M6 | research integrity — one snapshot per run, as-of-safe retrieval, macro-date confidence, entity-resolved news, computed trade math, shadowed signals | **done** |
 | M7 | `--stage outcomes` / `--stage evaluate` — experiment ledger, outcome resolution, signal grading v2, weekly evaluation report | **done** |
-| M8 | presentation — one-screen decision sheet, embedded charts, PDF attachments, analyst consensus | **in progress** |
+| M8 | presentation — one-screen decision sheet, embedded charts, PDF attachments, analyst consensus | **done** |
 
 ## Local quickstart
 
