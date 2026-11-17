@@ -130,10 +130,11 @@ def test_a_ticker_whose_pipeline_aborted_is_still_listed():
 
 
 class Settings:
-    """Minimal stand-in: run_report only needs the date and the report dir."""
+    """Minimal stand-in: the date, the report dir, and the bucket for links."""
 
     def __init__(self, root: Path, run_date: date):
         self._root, self.run_date = root, run_date
+        self.reports_bucket = ""
 
     def report_dir(self) -> Path:
         return self._root / self.run_date.isoformat()
@@ -152,7 +153,9 @@ def report_dir(tmp_path):
 def test_run_report_assembles_everything_from_disk(report_dir, monkeypatch):
     captured = {}
 
-    def fake_send(run_date, brief_path, deep_paths, verdicts, degraded_sources, evidence=""):
+    def fake_send(
+        run_date, brief_path, deep_paths, verdicts, degraded_sources, evidence="", sheet=None, bucket=""
+    ):
         captured.update(locals())
         return "sent"
 

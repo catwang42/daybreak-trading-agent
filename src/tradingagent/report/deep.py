@@ -36,6 +36,53 @@ def _flag(result: DeepResult, label: str) -> list[str]:
     return [f"> **DEGRADED** — {reason}", ""] if reason else []
 
 
+def consensus_gap(ours: float | None, theirs: float | None) -> str:
+    """``+12.4% vs consensus`` — our target measured against the sell side's.
+
+    Printed as a percentage of *their* number because that is the question:
+    how far from the crowd is this verdict standing. A large positive gap is
+    not a mistake, but it is a claim, and it should be visible next to the
+    claim rather than three sections away in the positioning table.
+    """
+    if not ours or not theirs:
+        return "—"
+    return f"{(ours / theirs - 1) * 100:+.1f}%"
+
+
+def _consensus_lines(result: DeepResult) -> list[str]:
+    """The sell side's posture on the same row as ours, in section 1.
+
+    The data was already in the evidence pack and already fed the sentiment
+    analyst; it just never reached a reader deciding whether to act. Missing
+    coverage is stated as missing — a name with no analysts is a fact about the
+    name, not a gap in the report.
+    """
+    evidence = getattr(result, "evidence", None)
+    positioning = getattr(evidence, "positioning", None)
+    decision = result.decision
+    if positioning is None:
+        return []
+    ours = decision.price_target if decision else None
+    mix = positioning.recommendation_spread or positioning.recommendation_key or "no coverage reported"
+    covering = (
+        f"{positioning.analyst_count} analyst(s)"
+        if positioning.analyst_count
+        else "analyst count unavailable"
+    )
+    mean = f"${positioning.target_mean:,.2f}" if positioning.target_mean else "—"
+    median = f"${positioning.target_median:,.2f}" if positioning.target_median else "—"
+    mine = f"${ours:,.2f}" if ours else "none stated"
+    return [
+        "**Analyst consensus** (yfinance, free tier — the sell side's posture, not ours)",
+        "",
+        "| Covering | Recommendation mix | Mean target | Median target | Our target | Gap vs mean |",
+        "|---|---|---:|---:|---:|---:|",
+        f"| {covering} | {mix} | {mean} | {median} | {mine} | "
+        f"{consensus_gap(ours, positioning.target_mean)} |",
+        "",
+    ]
+
+
 def _verdict(result: DeepResult) -> str:
     lines = ["## 1. Verdict", ""]
     decision = result.decision
@@ -67,6 +114,7 @@ def _verdict(result: DeepResult) -> str:
         f"**Invalidation:** {decision.invalidation}",
         "",
         *_flag(result, INVALIDATION_LINE),
+        *_consensus_lines(result),
     ]
     if result.degraded:
         lines += [
@@ -281,20 +329,32 @@ def _footer(result: DeepResult, brief_path: str) -> str:
     return "\n".join(lines)
 
 
+def _consensus_cell(result: DeepResult) -> str:
+    """The index's consensus column: the gap, and who it is a gap from."""
+    positioning = getattr(getattr(result, "evidence", None), "positioning", None)
+    decision = result.decision
+    if positioning is None or not positioning.target_mean:
+        return "—"
+    gap = consensus_gap(decision.price_target if decision else None, positioning.target_mean)
+    covering = f"{positioning.analyst_count}" if positioning.analyst_count else "?"
+    return f"{gap} ({covering} an.)"
+
+
 def render_deep_index(results: list[DeepResult]) -> str:
     """Body of section 5 of the daily brief, once the deep stage has run."""
     if not results:
         return "_The deep stage ran but the discovery queue was empty; no ticker was analysed._"
 
     lines = [
-        "| Ticker | Sector | Verdict | Target | Horizon | Trader | Report |",
-        "|---|---|---|---:|---|---|---|",
+        "| Ticker | Sector | Verdict | Target | vs consensus | Horizon | Trader | Report |",
+        "|---|---|---|---:|---:|---|---|---|",
     ]
     for r in results:
         d = r.decision
         target = f"${d.price_target:,.2f}" if d and d.price_target is not None else "—"
         lines.append(
             f"| **{r.symbol}** | {r.queued.sector or '—'} | {r.verdict} | {target} | "
+            f"{_consensus_cell(r)} | "
             f"{(d.time_horizon if d else None) or '—'} | "
             f"{r.proposal.action if r.proposal else '—'} | "
             f"[deep/{r.symbol}.md](deep/{r.symbol}.md) |"

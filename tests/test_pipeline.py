@@ -368,6 +368,73 @@ def test_section_four_publishes_the_computed_table_not_the_model_s_own_numbers()
     assert "no order path" in section
 
 
+def test_the_verdict_states_where_the_sell_side_stands(monkeypatch):
+    """Coverage was already in the evidence pack; it never reached the reader.
+
+    The gap is printed as a percentage of *their* number because that is the
+    question a reader has: how far from the crowd is this verdict standing.
+    """
+    from tradingagent.data.fundamentals import Positioning
+
+    ev = evidence()
+    ev.positioning = Positioning(
+        symbol="TST",
+        recommendation_key="buy",
+        recommendation_spread="12 buy / 4 hold / 1 sell",
+        analyst_count=17,
+        target_mean=200.0,
+        target_median=198.0,
+    )
+    result = analyze_ticker(FakeGateway(), ev, DegradedTracker(), rounds=1)
+    section = render_deep_report(result)
+    section = section[: section.index("## 2. Analyst Summaries")]
+
+    assert "Analyst consensus" in section
+    assert "17 analyst(s)" in section and "12 buy / 4 hold / 1 sell" in section
+    assert "$200.00" in section and "$198.00" in section
+    # The sample verdict targets 125 against a $200 mean.
+    assert "-37.5%" in section
+
+
+def test_a_name_with_no_coverage_says_so_rather_than_printing_a_blank_row():
+    from tradingagent.data.fundamentals import Positioning
+
+    ev = evidence()
+    ev.positioning = Positioning(symbol="TST")
+    result = analyze_ticker(FakeGateway(), ev, DegradedTracker(), rounds=1)
+    section = render_deep_report(result)
+
+    assert "no coverage reported" in section
+    assert "analyst count unavailable" in section
+
+
+def test_no_positioning_at_all_omits_the_row_entirely():
+    result = analyze_ticker(FakeGateway(), evidence(), DegradedTracker(), rounds=1)
+    assert "Analyst consensus" not in render_deep_report(result)
+
+
+def test_the_consensus_gap_needs_both_numbers_to_mean_anything():
+    from tradingagent.report.deep import consensus_gap
+
+    assert consensus_gap(112.0, 100.0) == "+12.0%"
+    assert consensus_gap(88.0, 100.0) == "-12.0%"
+    assert consensus_gap(None, 100.0) == "—"
+    assert consensus_gap(100.0, None) == "—"
+    assert consensus_gap(100.0, 0.0) == "—"  # no dividing by an absent target
+
+
+def test_the_index_carries_the_consensus_gap_as_its_own_column():
+    from tradingagent.data.fundamentals import Positioning
+
+    ev = evidence()
+    ev.positioning = Positioning(symbol="TST", analyst_count=17, target_mean=200.0)
+    result = analyze_ticker(FakeGateway(), ev, DegradedTracker(), rounds=1)
+    index = render_deep_index([result])
+
+    assert "| vs consensus |" in index
+    assert "-37.5% (17 an.)" in index
+
+
 def test_a_rejected_plan_says_so_in_the_brief_where_the_verdict_is_skimmed():
     result = analyze_ticker(FakeGateway(), evidence(), DegradedTracker(), rounds=1)
     assert "NO TRADE — inconsistent plan" in render_deep_index([result])

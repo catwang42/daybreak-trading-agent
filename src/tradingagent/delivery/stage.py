@@ -18,6 +18,7 @@ from pathlib import Path
 from ..config import Settings
 from ..data.validate import DegradedTracker
 from ..options.context import OptionsContext
+from ..presentation.sheet import build_sheet
 from .email import DeliveryResult, Verdict, send_daily_brief
 
 log = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ def verdicts_from_context(report_dir: Path) -> list[Verdict]:
 
 
 def deep_report_paths(report_dir: Path) -> list[Path]:
+    """The deep reports as markdown. The email renders each one to PDF."""
     deep_dir = report_dir / "deep"
     return sorted(deep_dir.glob("*.md")) if deep_dir.is_dir() else []
 
@@ -111,6 +113,14 @@ def run_report(
     if evidence is None:
         evidence = weekly_evidence(settings, run_date)
 
+    # The sheet is read from disk even during `--stage all`, which has all the
+    # objects in memory: the same code path then serves the re-delivery case,
+    # and a context that failed to write shows up here as a degraded email
+    # rather than as a difference between today's send and tomorrow's resend.
+    sheet = build_sheet(
+        run_date, report_dir, reports_dir=report_dir.parent, evidence=evidence or ""
+    )
+
     return send_daily_brief(
         run_date,
         brief_path,
@@ -118,6 +128,8 @@ def run_report(
         verdicts=verdicts,
         degraded_sources=sources,
         evidence=evidence,
+        sheet=sheet,
+        bucket=settings.reports_bucket,
     )
 
 

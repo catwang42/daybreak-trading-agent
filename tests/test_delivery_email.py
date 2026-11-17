@@ -1,4 +1,4 @@
-"""Email delivery: subject construction, HTML conversion, message assembly."""
+"""Email delivery: subject construction, attachment rendering, message assembly."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from email import message_from_bytes
 import pytest
 
 from tradingagent.delivery import email as E
+from tradingagent.presentation.charts import Chart
+from tradingagent.presentation.sheet import DecisionSheet
 
 RUN_DATE = date(2026, 8, 14)
 
@@ -78,7 +80,7 @@ def test_a_degraded_run_still_reports_its_verdicts():
     assert "1 verdicts, top: NVDA Buy" in subject
 
 
-# --- markdown -> html ---------------------------------------------------------
+# --- the sheet, the attachments, the message ----------------------------------
 
 BRIEF = """# Daily Brief — 2026-08-14
 
@@ -95,100 +97,132 @@ BRIEF = """# Daily Brief — 2026-08-14
 """
 
 
-def test_tables_survive_conversion_with_alignment_intact():
-    html = E.markdown_to_html(BRIEF)
-    assert "<table" in html and "</table>" in html
-    # Column alignment from the markdown must not be lost to the injected style.
-    assert "text-align:right" in html
+def sheet(**over):
+    """A sheet with no presentation context — the degraded-but-deliverable case.
 
-
-def test_every_table_is_horizontally_scrollable_on_a_phone():
-    html = E.markdown_to_html(BRIEF)
-    assert html.count("overflow-x:auto") >= html.count("<table")
-
-
-def test_styles_are_inline_because_gmail_strips_style_blocks():
-    html = E.markdown_to_html(BRIEF)
-    assert "<style" not in html
-    assert "<td style=" in html and "<th style=" in html
-
-
-def test_conversion_covers_the_rest_of_the_brief_vocabulary():
-    html = E.markdown_to_html(BRIEF)
-    for fragment in ("<h1 style=", "<h2 style=", "<blockquote style=", "<li style="):
-        assert fragment in html
-
-
-def test_html_is_a_standalone_document():
-    html = E.markdown_to_html(BRIEF, title="subject here")
-    assert html.startswith("<!DOCTYPE html>")
-    assert "<title>subject here</title>" in html
+    Section content is exercised in test_decision_sheet.py; what matters here is
+    the MIME envelope, which has to be right whether or not the sheet is full.
+    """
+    base = dict(run_date=RUN_DATE, unavailable=["no data file for this session"])
+    base.update(over)
+    return DecisionSheet(**base)
 
 
 # --- attachments ---------------------------------------------------------------
 
 
-def test_brief_and_deep_reports_are_all_attached(tmp_path):
+def test_the_reports_go_out_as_pdfs_not_markdown(tmp_path):
     brief = tmp_path / "daily-brief.md"
-    brief.write_text("# brief")
+    brief.write_text(BRIEF)
     deep = tmp_path / "NVDA.md"
     deep.write_text("# nvda")
 
-    items, dropped = E.collect_attachments(brief, [deep])
-    assert [i.filename for i in items] == ["daily-brief.md", "NVDA.md"]
-    assert dropped == []
+    items, dropped, links = E.collect_attachments(brief, [deep])
+    assert dropped == [] and links == []
+    if items[0].subtype == "markdown":
+        pytest.skip("WeasyPrint's system libraries are not installed here")
+    assert [i.filename for i in items] == ["daily-brief.pdf", "NVDA.pdf"]
+    assert all(i.data.startswith(b"%PDF") for i in items)
+
+
+def test_a_report_that_will_not_render_still_ships_as_markdown(tmp_path, monkeypatch):
+    """Losing the format is worth strictly less than losing the delivery."""
+    monkeypatch.setattr(E.pdf, "render_report", lambda path: None)
+    brief = tmp_path / "daily-brief.md"
+    brief.write_text(BRIEF)
+
+    items, _, _ = E.collect_attachments(brief, [])
+    assert [(i.filename, i.subtype) for i in items] == [("daily-brief.md", "markdown")]
 
 
 def test_a_missing_deep_report_is_reported_not_silently_skipped(tmp_path):
     brief = tmp_path / "daily-brief.md"
     brief.write_text("# brief")
 
-    items, dropped = E.collect_attachments(brief, [tmp_path / "GONE.md"])
-    assert [i.filename for i in items] == ["daily-brief.md"]
+    items, dropped, _ = E.collect_attachments(brief, [tmp_path / "GONE.md"])
+    assert len(items) == 1
     assert dropped == ["GONE.md (missing)"]
 
 
-def test_oversized_attachments_are_dropped_rather_than_failing_the_send(tmp_path, monkeypatch):
+def test_over_the_size_cap_the_research_is_linked_rather_than_lost(tmp_path, monkeypatch):
     monkeypatch.setattr(E, "MAX_ATTACHMENT_BYTES", 32)
+    monkeypatch.setattr(E.pdf, "render_report", lambda path: None)  # keep sizes predictable
     brief = tmp_path / "daily-brief.md"
     brief.write_text("x" * 16)
     big = tmp_path / "BIG.md"
     big.write_text("y" * 64)
 
-    items, dropped = E.collect_attachments(brief, [big])
+    items, dropped, links = E.collect_attachments(brief, [big], bucket="gs://our-bucket")
     assert [i.filename for i in items] == ["daily-brief.md"]
     assert dropped == ["BIG.md (size cap)"]
+    assert links and links[0][0] == "BIG.md" and "our-bucket" in links[0][1]
+
+
+def test_without_a_bucket_a_dropped_file_is_still_named(tmp_path, monkeypatch):
+    monkeypatch.setattr(E, "MAX_ATTACHMENT_BYTES", 8)
+    monkeypatch.setattr(E.pdf, "render_report", lambda path: None)
+    brief = tmp_path / "daily-brief.md"
+    brief.write_text("y" * 64)
+
+    items, dropped, links = E.collect_attachments(brief, [])
+    assert items == [] and dropped == ["daily-brief.md (size cap)"] and links == []
 
 
 # --- message assembly -----------------------------------------------------------
 
 
-def build(brief_md=BRIEF, attachments=None):
-    return E.build_message(cfg(), "subject", brief_md, attachments or [])
+def build(attachments=None, charts=None, links=None, s=None):
+    return E.build_message(cfg(), "subject", s or sheet(), attachments or [], charts, links)
 
 
 def test_message_carries_both_plain_text_and_html():
-    message = build()
-    types = {part.get_content_type() for part in message.walk()}
+    types = {part.get_content_type() for part in build().walk()}
     assert "text/plain" in types
     assert "text/html" in types
 
 
-def test_plain_text_part_is_the_markdown_verbatim():
-    message = build()
-    plain = next(p for p in message.walk() if p.get_content_type() == "text/plain")
-    assert plain.get_content().strip() == BRIEF.strip()
+def test_the_plain_text_part_is_the_sheet_not_the_brief():
+    plain = next(p for p in build().walk() if p.get_content_type() == "text/plain")
+    body = plain.get_content()
+    assert "DAYBREAK — 2026-08-14" in body
+    assert "| Index | Last |" not in body
 
 
-def test_attachments_ride_along_as_markdown_files():
-    message = build(attachments=[E.Attachment("NVDA.md", "# nvda")])
-    names = [p.get_filename() for p in message.walk() if p.get_filename()]
-    assert names == ["NVDA.md"]
+def test_attachments_ride_along_under_their_own_type():
+    message = build(attachments=[E.Attachment("NVDA.pdf", b"%PDF-1.7", "application", "pdf")])
+    parts = [p for p in message.walk() if p.get_filename()]
+    assert [p.get_filename() for p in parts] == ["NVDA.pdf"]
+    assert parts[0].get_content_type() == "application/pdf"
+
+
+def test_charts_are_inline_related_parts_so_the_body_can_draw_them():
+    chart = Chart(cid="spy", filename="spy.png", png=b"\x89PNG-not-really", alt="SPY")
+    message = build(charts=[chart])
+    related = next(p for p in message.walk() if p.get_content_type() == "multipart/related")
+    image = next(p for p in related.walk() if p.get_content_type() == "image/png")
+    assert image["Content-ID"] == "<spy>"
+    assert image.get_content_disposition() == "inline"
+    # That the body actually references cid:spy is asserted where the body is
+    # built, in test_decision_sheet.py; here the point is the MIME nesting,
+    # which is what decides whether a client draws it or lists it as a file.
+
+
+def test_the_html_lists_the_attachment_names_so_the_reader_knows_what_arrived():
+    message = build(attachments=[E.Attachment("WMB.pdf", b"%PDF", "application", "pdf")])
+    html = next(p for p in message.walk() if p.get_content_type() == "text/html").get_content()
+    assert "WMB.pdf" in html
+
+
+def test_size_capped_files_appear_in_the_body_as_links():
+    message = build(links=[("BIG.md", "https://console.example/BIG.md")])
+    html = next(p for p in message.walk() if p.get_content_type() == "text/html").get_content()
+    assert "https://console.example/BIG.md" in html
 
 
 def test_message_round_trips_through_the_wire_format():
     """Guards against a header or MIME-structure error that only shows on send."""
-    message = build(attachments=[E.Attachment("NVDA.md", "# nvda")])
+    chart = Chart(cid="spy", filename="spy.png", png=b"\x89PNG", alt="SPY")
+    message = build(attachments=[E.Attachment("NVDA.pdf", b"%PDF", "application", "pdf")], charts=[chart])
     parsed = message_from_bytes(bytes(message))
     assert parsed["Subject"] == "subject"
     assert parsed["To"] == "human@example.com"
@@ -197,7 +231,7 @@ def test_message_round_trips_through_the_wire_format():
 
 def test_multiple_recipients_are_comma_joined():
     message = E.build_message(
-        cfg(recipients=("a@example.com", "b@example.com")), "s", "# x", []
+        cfg(recipients=("a@example.com", "b@example.com")), "s", sheet(), []
     )
     assert message["To"] == "a@example.com, b@example.com"
 
@@ -344,7 +378,7 @@ def test_send_daily_brief_attaches_everything_and_builds_the_subject(tmp_path, m
 
     assert result.sent
     assert result.subject == "Daybreak 2026-08-14 — 1 verdicts, top: NVDA Buy · DEGRADED: Finnhub"
-    assert result.attachments == ["daily-brief.md", "NVDA.md"]
+    assert [name.rsplit(".", 1)[0] for name in result.attachments] == ["daily-brief", "NVDA"]
     assert FakeSMTP.instances[0].sent["Subject"] == result.subject
 
 
@@ -400,18 +434,32 @@ def test_the_evidence_block_rides_in_the_body_and_not_in_the_attachment(tmp_path
 
     assert result.sent
     sent = FakeSMTP.instances[-1].sent
-    body = sent.get_body(preferencelist=("plain",)).get_content()
-    assert "Evidence so far" in body
-    attachment = next(part for part in sent.iter_attachments())
-    assert "Evidence so far" not in attachment.get_content()
+    for subtype in ("plain", "html"):
+        assert "Evidence so far" in sent.get_body(preferencelist=(subtype,)).get_content()
     assert brief.read_text() == BRIEF  # the file on disk is untouched
 
 
-def test_no_evidence_leaves_the_body_exactly_as_the_brief(tmp_path, monkeypatch):
+def test_the_evidence_survives_a_session_with_no_decision_sheet_data(tmp_path, monkeypatch):
+    """It is a statement about every prior day, not about this one.
+
+    Dropping it when today's context is missing would lose Friday's record on
+    exactly the runs that went least well.
+    """
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    brief = tmp_path / "daily-brief.md"
+    brief.write_text(BRIEF)
+
+    E.send_daily_brief(RUN_DATE, brief, config=cfg(), evidence="7 of 12 correct.")
+    body = FakeSMTP.instances[-1].sent.get_body(preferencelist=("plain",)).get_content()
+    assert "7 of 12 correct." in body
+
+
+def test_no_evidence_means_no_evidence_section(tmp_path, monkeypatch):
     monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
     brief = tmp_path / "daily-brief.md"
     brief.write_text(BRIEF)
 
     E.send_daily_brief(RUN_DATE, brief, config=cfg(), evidence="   ")
-    body = FakeSMTP.instances[-1].sent.get_body(preferencelist=("plain",)).get_content()
-    assert body.strip() == BRIEF.strip()
+    sent = FakeSMTP.instances[-1].sent
+    for subtype in ("plain", "html"):
+        assert "vidence so far" not in sent.get_body(preferencelist=(subtype,)).get_content()

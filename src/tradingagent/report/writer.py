@@ -39,3 +39,24 @@ def upload_to_gcs(bucket: str, local_path: Path, content: str) -> None:
     from ..storage import blob_name, upload_text
 
     upload_text(bucket, blob_name(local_path), content, content_type="text/markdown")
+
+
+def mirror_json(bucket: str, path: Path) -> None:
+    """Push a stage-handoff artefact to GCS.
+
+    Only the presentation context uses this, and for a reason the other context
+    files do not have: a Cloud Run container starts with an empty disk, so a
+    re-delivery — ``--stage report`` after a bounced email — has nothing to
+    rebuild the sheet from unless the artefact outlived the container that wrote
+    it. Best effort; the local file is what this run's own delivery reads.
+    """
+    if not bucket:
+        return
+    try:
+        from ..storage import blob_name, upload_text
+
+        upload_text(
+            bucket, blob_name(path), path.read_text(), content_type="application/json"
+        )
+    except Exception as exc:  # noqa: BLE001 - the local artefact is authoritative
+        log.warning("Could not mirror %s to %s: %s", path.name, bucket, exc)
