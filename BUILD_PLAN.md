@@ -1,3 +1,5 @@
+> **STATUS: COMPLETED V1 RECORD — SUPERSEDED.** Milestones M1–M8 are built, merged, and deployed. This file is kept as the historical record of the V1 build. Active planning lives in [`DAYBREAK_V2_EVOLUTION_PLAN.md`](DAYBREAK_V2_EVOLUTION_PLAN.md), which supersedes this document wherever they differ.
+
 # Daily Trading Research Agent — Build Plan v3 (Claude-Agnostic Runtime, 5 Milestones)
 
 > Strategy: Claude Code is the BUILDER; the product is a provider-agnostic Python app (see CLAUDE.md architecture rules), deployed on Google Cloud Run Jobs. TradingAgents, tradermonty skills, and staskh skills are READ-ONLY cookbooks in reference/ — their prompts and logic get ported into src/ (see PORTING_NOTES.md), never installed as runtime deps.
